@@ -8,8 +8,10 @@ import (
 )
 
 type Config struct {
-	Port    string
-	GinMode string
+	Port        string
+	GinMode     string
+	MongoURI    string
+	MongoDBName string
 }
 
 func LoadConfig() *Config {
@@ -18,8 +20,10 @@ func LoadConfig() *Config {
 	}
 
 	return &Config{
-		Port:    getEnv("PORT", "8080"),
-		GinMode: getEnv("GIN_MODE", "debug"),
+		Port:        getEnv("PORT", "8080"),
+		GinMode:     getEnv("GIN_MODE", "debug"),
+		MongoURI:    getEnv("MONGODB_URI", "mongodb://localhost:27017"),
+		MongoDBName: getEnv("MONGODB_DB", "gclass"),
 	}
 }
 
