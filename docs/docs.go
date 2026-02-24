@@ -34,6 +34,7 @@ func buildSwaggerTemplate() (string, error) {
 
 	mergePaths(doc, pingSwaggerPaths())
 	mergePaths(doc, schoolSwaggerPaths())
+	mergePaths(doc, userSwaggerPaths())
 
 	mergeDefinitions(doc, schoolSwaggerDefinitions())
 
