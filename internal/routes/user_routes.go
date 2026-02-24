@@ -2,6 +2,7 @@ package routes
 
 import (
 	"github.com/0mar12345-ops/internal/handlers"
+	"github.com/0mar12345-ops/internal/middleware"
 	"github.com/0mar12345-ops/internal/services"
 	"github.com/gin-gonic/gin"
 )
@@ -22,10 +23,18 @@ func registerUserRoutes(api *gin.RouterGroup, deps Dependencies) {
 		deps.JWTCookieName,
 		deps.JWTExpiryHours,
 	)
+	authGuard := middleware.NewAuthGuard(deps.JWTSecret, deps.JWTCookieName)
 
 	users := api.Group("/users")
 	{
 		users.GET("/oauth/google", oauthHandler.GoogleOAuthStart)
 		users.GET("/oauth/google/callback", oauthHandler.GoogleOAuthCallback)
+
+		protected := users.Group("")
+		protected.Use(authGuard.RequireAuth())
+		{
+			protected.GET("/me", oauthHandler.Me)
+			protected.POST("/logout", oauthHandler.Logout)
+		}
 	}
 }

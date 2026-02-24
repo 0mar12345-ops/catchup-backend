@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/0mar12345-ops/internal/middleware"
 	"github.com/0mar12345-ops/internal/services"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -74,6 +75,31 @@ func (h *UserOAuthHandler) GoogleOAuthCallback(c *gin.Context) {
 	c.Redirect(http.StatusFound, frontendURL)
 }
 
+func (h *UserOAuthHandler) Me(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	username, _ := claims["name"].(string)
+	role, _ := claims["role"].(string)
+	if role == "" {
+		role = "teacher"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"username": username,
+		"role":     role,
+	})
+}
+
+func (h *UserOAuthHandler) Logout(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(h.cookieName, "", -1, "/", "", false, true)
+	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
+}
+
 func (h *UserOAuthHandler) createJWT(data *services.OAuthSyncResult) (string, error) {
 	now := time.Now().UTC()
 	expiresAt := now.Add(time.Duration(h.jwtExpiryHour) * time.Hour)
@@ -83,6 +109,7 @@ func (h *UserOAuthHandler) createJWT(data *services.OAuthSyncResult) (string, er
 		"school_id":     data.SchoolID,
 		"email":         data.TeacherEmail,
 		"name":          data.TeacherName,
+		"role":          "teacher",
 		"courses_sync":  data.CoursesSynced,
 		"students_sync": data.StudentsSynced,
 		"iat":           now.Unix(),

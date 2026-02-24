@@ -22,5 +22,22 @@ func userSwaggerPaths() map[string]any {
 				},
 			},
 		},
+		"/api/users/me": map[string]any{
+			"get": map[string]any{
+				"summary": "Get logged-in user",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OK"},
+					"401": map[string]any{"description": "Unauthorized"},
+				},
+			},
+		},
+		"/api/users/logout": map[string]any{
+			"post": map[string]any{
+				"summary": "Logout user",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OK"},
+				},
+			},
+		},
 	}
 }
