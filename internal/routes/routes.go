@@ -1,15 +1,25 @@
 package routes
 
 import (
-	"github.com/0mar12345-ops/internal/handlers"
 	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
-func SetupRoutes(router *gin.Engine) {
-	pingHandler := handlers.NewPingHandler()
+type Dependencies struct {
+	MongoClient *mongo.Client
+	DBName      string
+}
+
+func SetupRoutes(router *gin.Engine, mongoClient *mongo.Client, dbName string) {
+	deps := Dependencies{
+		MongoClient: mongoClient,
+		DBName:      dbName,
+	}
+
+	registerSwaggerRoutes(router)
 
 	api := router.Group("/api")
-	{
-		api.GET("/ping", pingHandler.Ping)
-	}
+
+	registerPingRoutes(api)
+	registerSchoolRoutes(api, deps)
 }

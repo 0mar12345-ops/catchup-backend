@@ -14,6 +14,6 @@ func NewPingHandler() *PingHandler {
 
 func (h *PingHandler) Ping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"message": "pong 2",
+		"message": "pong",
 	})
 }

@@ -36,7 +36,7 @@ func main() {
 
 	router := gin.Default()
 
-	routes.SetupRoutes(router)
+	routes.SetupRoutes(router, mongoClient, cfg.MongoDBName)
 
 	log.Printf("Starting server on port %s...", cfg.Port)
 	if err := router.Run(":" + cfg.Port); err != nil {
