@@ -339,13 +339,20 @@ func (s *UserOAuthService) getFirstSchool(ctx context.Context) (*models.School, 
 }
 
 func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.ObjectID, info *googleUserInfo, now time.Time) (*models.User, error) {
-	filter := bson.M{"school_id": schoolID, "google_user_id": info.ID}
+	normalizedEmail := strings.TrimSpace(strings.ToLower(info.Email))
+	filter := bson.M{
+		"school_id": schoolID,
+		"$or": []bson.M{
+			{"google_user_id": info.ID},
+			{"email": normalizedEmail},
+		},
+	}
 
 	user := models.User{
 		SchoolID:     schoolID,
 		Role:         models.UserRoleTeacher,
 		Name:         info.Name,
-		Email:        info.Email,
+		Email:        normalizedEmail,
 		GoogleUserID: info.ID,
 		IsActive:     true,
 		LastLoginAt:  &now,
@@ -373,13 +380,14 @@ func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.Obje
 	}
 
 	update := bson.M{"$set": bson.M{
-		"name":          user.Name,
-		"email":         user.Email,
-		"role":          user.Role,
-		"is_active":     true,
-		"last_login_at": &now,
-		"external_refs": user.ExternalRefs,
-		"updated_at":    now,
+		"name":           user.Name,
+		"email":          user.Email,
+		"google_user_id": user.GoogleUserID,
+		"role":           user.Role,
+		"is_active":      true,
+		"last_login_at":  &now,
+		"external_refs":  user.ExternalRefs,
+		"updated_at":     now,
 	}}
 
 	_, err = s.usersCollection.UpdateOne(ctx, bson.M{"_id": existing.ID}, update)
