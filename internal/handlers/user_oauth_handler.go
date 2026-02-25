@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/0mar12345-ops/internal/middleware"
@@ -17,6 +19,8 @@ type UserOAuthHandler struct {
 	jwtSecret     []byte
 	cookieName    string
 	jwtExpiryHour int
+	cookieDomain  string
+	cookieSecure  bool
 }
 
 func NewUserOAuthHandler(service *services.UserOAuthService, jwtSecret, cookieName string, jwtExpiryHour int) *UserOAuthHandler {
@@ -27,11 +31,15 @@ func NewUserOAuthHandler(service *services.UserOAuthService, jwtSecret, cookieNa
 		jwtExpiryHour = 24
 	}
 
+	cookieDomain, cookieSecure := deriveCookieSettings(service.FrontendURL())
+
 	return &UserOAuthHandler{
 		service:       service,
 		jwtSecret:     []byte(jwtSecret),
 		cookieName:    cookieName,
 		jwtExpiryHour: jwtExpiryHour,
+		cookieDomain:  cookieDomain,
+		cookieSecure:  cookieSecure,
 	}
 }
 
@@ -64,7 +72,7 @@ func (h *UserOAuthHandler) GoogleOAuthCallback(c *gin.Context) {
 
 	maxAge := h.jwtExpiryHour * 60 * 60
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(h.cookieName, tokenString, maxAge, "/", "", false, true)
+	c.SetCookie(h.cookieName, tokenString, maxAge, "/", h.cookieDomain, h.cookieSecure, true)
 
 	frontendURL := h.service.FrontendURL()
 	if frontendURL == "" {
@@ -112,8 +120,33 @@ func (h *UserOAuthHandler) Me(c *gin.Context) {
 
 func (h *UserOAuthHandler) Logout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(h.cookieName, "", -1, "/", "", false, true)
+	c.SetCookie(h.cookieName, "", -1, "/", h.cookieDomain, h.cookieSecure, true)
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
+}
+
+func deriveCookieSettings(frontendURL string) (domain string, secure bool) {
+	parsed, err := url.Parse(frontendURL)
+	if err != nil {
+		return "", false
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		return "", parsed.Scheme == "https"
+	}
+
+	if host == "localhost" {
+		// For localhost, do not set Domain explicitly.
+		// Many browsers treat Domain=localhost as invalid and drop the cookie.
+		return "", parsed.Scheme == "https"
+	}
+
+	if strings.HasPrefix(host, "127.") || host == "::1" {
+		// Keep host-only for loopback as well.
+		return "", parsed.Scheme == "https"
+	}
+
+	return host, parsed.Scheme == "https"
 }
 
 func (h *UserOAuthHandler) createJWT(data *services.OAuthSyncResult) (string, error) {
