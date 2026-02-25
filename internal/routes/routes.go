@@ -42,4 +42,5 @@ func SetupRoutes(router *gin.Engine, mongoClient *mongo.Client, cfg *config.Conf
 	registerPingRoutes(api)
 	registerSchoolRoutes(api, deps)
 	registerUserRoutes(api, deps)
+	registerCourseRoutes(api, deps)
 }

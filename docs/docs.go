@@ -35,8 +35,10 @@ func buildSwaggerTemplate() (string, error) {
 	mergePaths(doc, pingSwaggerPaths())
 	mergePaths(doc, schoolSwaggerPaths())
 	mergePaths(doc, userSwaggerPaths())
+	mergePaths(doc, courseSwaggerPaths())
 
 	mergeDefinitions(doc, schoolSwaggerDefinitions())
+	mergeDefinitions(doc, courseSwaggerDefinitions())
 
 	bytes, err := json.Marshal(doc)
 	if err != nil {
