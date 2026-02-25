@@ -9,10 +9,11 @@ import (
 )
 
 type Config struct {
-	Port        string
-	GinMode     string
-	MongoURI    string
-	MongoDBName string
+	Port               string
+	GinMode            string
+	MongoURI           string
+	MongoDBName        string
+	CORSAllowedOrigins string
 
 	GoogleClientID     string
 	GoogleClientSecret string
@@ -31,10 +32,11 @@ func LoadConfig() *Config {
 	}
 
 	return &Config{
-		Port:        getEnv("PORT", "8080"),
-		GinMode:     getEnv("GIN_MODE", "debug"),
-		MongoURI:    getEnv("MONGODB_URI", "mongodb://localhost:27017"),
-		MongoDBName: getEnv("MONGODB_DB", "gclass"),
+		Port:               getEnv("PORT", "8080"),
+		GinMode:            getEnv("GIN_MODE", "debug"),
+		MongoURI:           getEnv("MONGODB_URI", "mongodb://localhost:27017"),
+		MongoDBName:        getEnv("MONGODB_DB", "gclass"),
+		CORSAllowedOrigins: getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000"),
 
 		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
