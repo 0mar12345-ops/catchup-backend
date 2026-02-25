@@ -83,8 +83,7 @@ func (s *UserOAuthService) FrontendURL() string {
 }
 
 type MeData struct {
-	User    models.User     `json:"user"`
-	Courses []models.Course `json:"courses"`
+	User models.User `json:"user"`
 }
 
 func (s *UserOAuthService) GetMeData(ctx context.Context, userID, schoolID string) (*MeData, error) {
@@ -103,20 +102,8 @@ func (s *UserOAuthService) GetMeData(ctx context.Context, userID, schoolID strin
 		return nil, err
 	}
 
-	cursor, err := s.coursesCollection.Find(ctx, bson.M{"school_id": schoolOID, "teacher_id": userOID})
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	courses := make([]models.Course, 0)
-	if err := cursor.All(ctx, &courses); err != nil {
-		return nil, err
-	}
-
 	return &MeData{
-		User:    user,
-		Courses: courses,
+		User: user,
 	}, nil
 }
 

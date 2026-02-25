@@ -114,7 +114,6 @@ func (h *UserOAuthHandler) Me(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"username": meData.User.Name,
 		"role":     meData.User.Role,
-		"courses":  meData.Courses,
 	})
 }
 
