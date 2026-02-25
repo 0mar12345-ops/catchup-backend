@@ -82,15 +82,31 @@ func (h *UserOAuthHandler) Me(c *gin.Context) {
 		return
 	}
 
-	username, _ := claims["name"].(string)
-	role, _ := claims["role"].(string)
-	if role == "" {
-		role = "teacher"
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	meData, err := h.service.GetMeData(ctx, userID, schoolID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrInvalidAuthUserID), errors.Is(err, services.ErrInvalidAuthSchoolID):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user profile"})
+		}
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"username": username,
-		"role":     role,
+		"username": meData.User.Name,
+		"role":     meData.User.Role,
+		"courses":  meData.Courses,
 	})
 }
 

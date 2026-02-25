@@ -22,6 +22,8 @@ var (
 	ErrInvalidOAuthState   = errors.New("invalid oauth state")
 	ErrMissingOAuthCode    = errors.New("missing oauth code")
 	ErrOAuthSchoolNotFound = errors.New("no school found in database")
+	ErrInvalidAuthUserID   = errors.New("invalid auth user id")
+	ErrInvalidAuthSchoolID = errors.New("invalid auth school id")
 )
 
 type UserOAuthService struct {
@@ -78,6 +80,44 @@ func (s *UserOAuthService) GetGoogleAuthURL() string {
 
 func (s *UserOAuthService) FrontendURL() string {
 	return s.frontendURL
+}
+
+type MeData struct {
+	User    models.User     `json:"user"`
+	Courses []models.Course `json:"courses"`
+}
+
+func (s *UserOAuthService) GetMeData(ctx context.Context, userID, schoolID string) (*MeData, error) {
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, ErrInvalidAuthUserID
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, ErrInvalidAuthSchoolID
+	}
+
+	var user models.User
+	if err := s.usersCollection.FindOne(ctx, bson.M{"_id": userOID, "school_id": schoolOID}).Decode(&user); err != nil {
+		return nil, err
+	}
+
+	cursor, err := s.coursesCollection.Find(ctx, bson.M{"school_id": schoolOID, "teacher_id": userOID})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	courses := make([]models.Course, 0)
+	if err := cursor.All(ctx, &courses); err != nil {
+		return nil, err
+	}
+
+	return &MeData{
+		User:    user,
+		Courses: courses,
+	}, nil
 }
 
 type OAuthSyncResult struct {
