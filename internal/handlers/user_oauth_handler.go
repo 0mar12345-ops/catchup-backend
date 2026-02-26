@@ -49,6 +49,33 @@ func (h *UserOAuthHandler) GoogleOAuthStart(c *gin.Context) {
 	})
 }
 
+func (h *UserOAuthHandler) CheckEmail(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid email format"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	exists, err := h.service.CheckUserExistsByEmail(ctx, req.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check email"})
+		return
+	}
+
+	authURL := h.service.GetGoogleAuthURLWithPrompt(!exists)
+
+	c.JSON(http.StatusOK, gin.H{
+		"exists":   exists,
+		"auth_url": authURL,
+	})
+}
+
 func (h *UserOAuthHandler) GoogleOAuthCallback(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
@@ -135,13 +162,10 @@ func deriveCookieSettings(frontendURL string) (domain string, secure bool) {
 	}
 
 	if host == "localhost" {
-		// For localhost, do not set Domain explicitly.
-		// Many browsers treat Domain=localhost as invalid and drop the cookie.
 		return "", parsed.Scheme == "https"
 	}
 
 	if strings.HasPrefix(host, "127.") || host == "::1" {
-		// Keep host-only for loopback as well.
 		return "", parsed.Scheme == "https"
 	}
 
