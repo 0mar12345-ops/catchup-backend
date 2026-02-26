@@ -49,3 +49,40 @@ func (h *CourseHandler) ListDashboardCourses(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"courses": courses})
 }
+
+func (h *CourseHandler) GetCourse(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	courseID := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	course, err := h.service.GetCourseWithStudents(ctx, courseID, userID, schoolID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrInvalidCourseID):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid course id"})
+		case errors.Is(err, services.ErrCourseNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "course not found"})
+		case errors.Is(err, services.ErrInvalidCourseUserID), errors.Is(err, services.ErrInvalidCourseSchoolID):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch course"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, course)
+}

@@ -243,11 +243,13 @@ type googleCoursesResponse struct {
 }
 
 type googleCourse struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Section     string `json:"section"`
-	Description string `json:"descriptionHeading"`
-	CourseState string `json:"courseState"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Section            string `json:"section"`
+	DescriptionHeading string `json:"descriptionHeading"`
+	Description        string `json:"description"`
+	Room               string `json:"room"`
+	CourseState        string `json:"courseState"`
 }
 
 type googleStudentsResponse struct {
@@ -509,7 +511,8 @@ func (s *UserOAuthService) upsertCourse(
 		TeacherID:    teacherID,
 		Name:         gc.Name,
 		Section:      gc.Section,
-		Subject:      gc.Description,
+		Subject:      gc.DescriptionHeading,
+		Room:         gc.Room,
 		StudentCount: 0,
 		Source:       models.CourseSourceGoogleClassroom,
 		ExternalRefs: []models.ExternalSystemRef{{
@@ -542,6 +545,7 @@ func (s *UserOAuthService) upsertCourse(
 		"name":           course.Name,
 		"section":        course.Section,
 		"subject":        course.Subject,
+		"room":           course.Room,
 		"source":         course.Source,
 		"external_refs":  course.ExternalRefs,
 		"is_archived":    course.IsArchived,
@@ -558,6 +562,7 @@ func (s *UserOAuthService) upsertCourse(
 	existing.Name = course.Name
 	existing.Section = course.Section
 	existing.Subject = course.Subject
+	existing.Room = course.Room
 	existing.Source = course.Source
 	existing.ExternalRefs = course.ExternalRefs
 	existing.IsArchived = course.IsArchived

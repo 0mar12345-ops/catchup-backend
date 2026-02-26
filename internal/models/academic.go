@@ -21,6 +21,7 @@ type Course struct {
 	Name           string              `bson:"name" json:"name"`
 	Section        string              `bson:"section,omitempty" json:"section,omitempty"`
 	Subject        string              `bson:"subject,omitempty" json:"subject,omitempty"`
+	Room           string              `bson:"room,omitempty" json:"room,omitempty"`
 	GradeLevel     string              `bson:"grade_level,omitempty" json:"grade_level,omitempty"`
 	StudentCount   int                 `bson:"student_count" json:"student_count"`
 	Source         CourseSource        `bson:"source" json:"source"`

@@ -16,5 +16,6 @@ func registerCourseRoutes(api *gin.RouterGroup, deps Dependencies) {
 	courses.Use(authGuard.RequireAuth())
 	{
 		courses.GET("", courseHandler.ListDashboardCourses)
+		courses.GET("/:id", courseHandler.GetCourse)
 	}
 }
