@@ -9,6 +9,7 @@ import (
 type Dependencies struct {
 	MongoClient *mongo.Client
 	DBName      string
+	Config      *config.Config
 
 	GoogleClientID     string
 	GoogleClientSecret string
@@ -24,6 +25,7 @@ func SetupRoutes(router *gin.Engine, mongoClient *mongo.Client, cfg *config.Conf
 	deps := Dependencies{
 		MongoClient: mongoClient,
 		DBName:      cfg.MongoDBName,
+		Config:      cfg,
 
 		GoogleClientID:     cfg.GoogleClientID,
 		GoogleClientSecret: cfg.GoogleClientSecret,
@@ -43,4 +45,5 @@ func SetupRoutes(router *gin.Engine, mongoClient *mongo.Client, cfg *config.Conf
 	registerSchoolRoutes(api, deps)
 	registerUserRoutes(api, deps)
 	registerCourseRoutes(api, deps)
+	registerCatchUpRoutes(api, deps)
 }
