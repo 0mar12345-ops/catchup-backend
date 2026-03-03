@@ -11,7 +11,7 @@ func registerCatchUpRoutes(api *gin.RouterGroup, deps Dependencies) {
 	catchUpService := services.NewCatchUpService(deps.MongoClient, deps.DBName, deps.Config)
 	catchUpHandler := handlers.NewCatchUpHandler(catchUpService)
 
-	catchUpViewService := services.NewCatchUpViewService(deps.MongoClient, deps.DBName)
+	catchUpViewService := services.NewCatchUpViewService(deps.MongoClient, deps.DBName, deps.Config)
 	catchUpViewHandler := handlers.NewCatchUpViewHandler(catchUpViewService)
 
 	authGuard := middleware.NewAuthGuard(deps.JWTSecret, deps.JWTCookieName)

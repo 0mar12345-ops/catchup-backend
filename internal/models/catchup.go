@@ -129,25 +129,27 @@ type QuizQuestion struct {
 }
 
 type CatchUpLesson struct {
-	ID                 bson.ObjectID  `bson:"_id,omitempty" json:"id"`
-	SchoolID           bson.ObjectID  `bson:"school_id" json:"school_id"`
-	CourseID           bson.ObjectID  `bson:"course_id" json:"course_id"`
-	StudentID          bson.ObjectID  `bson:"student_id" json:"student_id"`
-	AbsenceRecordID    bson.ObjectID  `bson:"absence_record_id" json:"absence_record_id"`
-	ExtractedContentID bson.ObjectID  `bson:"extracted_content_id" json:"extracted_content_id"`
-	Status             CatchUpStatus  `bson:"status" json:"status"`
-	Explanation        string         `bson:"explanation" json:"explanation"`
-	LearningObjectives []string       `bson:"learning_objectives,omitempty" json:"learning_objectives,omitempty"`
-	Quiz               []QuizQuestion `bson:"quiz" json:"quiz"`
-	GenerationModel    string         `bson:"generation_model,omitempty" json:"generation_model,omitempty"`
-	PromptVersion      string         `bson:"prompt_version,omitempty" json:"prompt_version,omitempty"`
-	RegenerationCount  int            `bson:"regeneration_count" json:"regeneration_count"`
-	GeneratedAt        *time.Time     `bson:"generated_at,omitempty" json:"generated_at,omitempty"`
-	DeliveredAt        *time.Time     `bson:"delivered_at,omitempty" json:"delivered_at,omitempty"`
-	CompletedAt        *time.Time     `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
-	LockedAt           *time.Time     `bson:"locked_at,omitempty" json:"locked_at,omitempty"`
-	CreatedAt          time.Time      `bson:"created_at" json:"created_at"`
-	UpdatedAt          time.Time      `bson:"updated_at" json:"updated_at"`
+	ID                      bson.ObjectID  `bson:"_id,omitempty" json:"id"`
+	SchoolID                bson.ObjectID  `bson:"school_id" json:"school_id"`
+	CourseID                bson.ObjectID  `bson:"course_id" json:"course_id"`
+	StudentID               bson.ObjectID  `bson:"student_id" json:"student_id"`
+	AbsenceRecordID         bson.ObjectID  `bson:"absence_record_id" json:"absence_record_id"`
+	ExtractedContentID      bson.ObjectID  `bson:"extracted_content_id" json:"extracted_content_id"`
+	Status                  CatchUpStatus  `bson:"status" json:"status"`
+	Explanation             string         `bson:"explanation" json:"explanation"`
+	LearningObjectives      []string       `bson:"learning_objectives,omitempty" json:"learning_objectives,omitempty"`
+	Quiz                    []QuizQuestion `bson:"quiz" json:"quiz"`
+	GenerationModel         string         `bson:"generation_model,omitempty" json:"generation_model,omitempty"`
+	PromptVersion           string         `bson:"prompt_version,omitempty" json:"prompt_version,omitempty"`
+	RegenerationCount       int            `bson:"regeneration_count" json:"regeneration_count"`
+	ClassroomAssignmentID   string         `bson:"classroom_assignment_id,omitempty" json:"classroom_assignment_id,omitempty"`
+	ClassroomAssignmentLink string         `bson:"classroom_assignment_link,omitempty" json:"classroom_assignment_link,omitempty"`
+	GeneratedAt             *time.Time     `bson:"generated_at,omitempty" json:"generated_at,omitempty"`
+	DeliveredAt             *time.Time     `bson:"delivered_at,omitempty" json:"delivered_at,omitempty"`
+	CompletedAt             *time.Time     `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	LockedAt                *time.Time     `bson:"locked_at,omitempty" json:"locked_at,omitempty"`
+	CreatedAt               time.Time      `bson:"created_at" json:"created_at"`
+	UpdatedAt               time.Time      `bson:"updated_at" json:"updated_at"`
 }
 
 type CatchUpEventType string

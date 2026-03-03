@@ -105,10 +105,18 @@ func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 
 	lessonID := c.Param("lessonId")
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	var req struct {
+		DueDate *time.Time `json:"due_date"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	err := h.service.DeliverCatchUpLesson(ctx, lessonID, userID, schoolID)
+	err := h.service.DeliverCatchUpLesson(ctx, lessonID, userID, schoolID, req.DueDate)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrCatchUpLessonNotFound):
@@ -116,7 +124,9 @@ func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 		case errors.Is(err, services.ErrUnauthorizedAccess):
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to deliver lesson"})
+			// Log the detailed error for debugging
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to deliver lesson", "details": err.Error()})
 		}
 		return
 	}
