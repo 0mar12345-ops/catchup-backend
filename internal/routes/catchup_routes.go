@@ -20,6 +20,7 @@ func registerCatchUpRoutes(api *gin.RouterGroup, deps Dependencies) {
 	catchup.Use(authGuard.RequireAuth())
 	{
 		catchup.POST("/generate", catchUpHandler.GenerateCatchUp)
+		catchup.GET("/course/:courseId/student/:studentId/lessons", catchUpViewHandler.GetStudentCatchUpLessons)
 		catchup.GET("/course/:courseId/student/:studentId", catchUpViewHandler.GetCatchUpLesson)
 		catchup.POST("/lesson/:lessonId/deliver", catchUpViewHandler.DeliverCatchUpLesson)
 	}

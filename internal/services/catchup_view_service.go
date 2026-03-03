@@ -23,6 +23,17 @@ type CatchUpViewService struct {
 	contentItemsCollection     *mongo.Collection
 }
 
+type StudentCatchUpLessonResponse struct {
+	ID          string    `json:"id"`
+	StudentID   string    `json:"student_id"`
+	CourseID    string    `json:"course_id"`
+	AbsenceDate time.Time `json:"absence_date"`
+	Status      string    `json:"status"`
+	WordCount   int       `json:"word_count,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 func NewCatchUpViewService(client *mongo.Client, dbName string) *CatchUpViewService {
 	db := client.Database(dbName)
 
@@ -248,4 +259,101 @@ func (s *CatchUpViewService) DeliverCatchUpLesson(
 	)
 
 	return err
+}
+
+func (s *CatchUpViewService) GetStudentCatchUpLessons(
+	ctx context.Context,
+	courseID, studentID, userID, schoolID string,
+) ([]StudentCatchUpLessonResponse, error) {
+	courseOID, err := bson.ObjectIDFromHex(courseID)
+	if err != nil {
+		return nil, errors.New("invalid course id")
+	}
+
+	studentOID, err := bson.ObjectIDFromHex(studentID)
+	if err != nil {
+		return nil, errors.New("invalid student id")
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, errors.New("invalid school id")
+	}
+
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":        courseOID,
+		"school_id":  schoolOID,
+		"teacher_id": userOID,
+	}).Decode(&course)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUnauthorizedAccess
+		}
+		return nil, err
+	}
+
+	var student models.Student
+	err = s.studentsCollection.FindOne(ctx, bson.M{
+		"_id":       studentOID,
+		"school_id": schoolOID,
+	}).Decode(&student)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("student not found")
+		}
+		return nil, err
+	}
+
+	cursor, err := s.catchUpLessonsCollection.Find(ctx, bson.M{
+		"school_id":  schoolOID,
+		"course_id":  courseOID,
+		"student_id": studentOID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var lessons []models.CatchUpLesson
+	if err = cursor.All(ctx, &lessons); err != nil {
+		return nil, err
+	}
+
+	response := make([]StudentCatchUpLessonResponse, 0, len(lessons))
+	for _, lesson := range lessons {
+		lessonResp := StudentCatchUpLessonResponse{
+			ID:        lesson.ID.Hex(),
+			StudentID: lesson.StudentID.Hex(),
+			CourseID:  lesson.CourseID.Hex(),
+			Status:    string(lesson.Status),
+			CreatedAt: lesson.CreatedAt,
+			UpdatedAt: lesson.UpdatedAt,
+		}
+
+		var absenceRecord models.AbsenceRecord
+		err := s.catchUpLessonsCollection.Database().Collection("absence_records").FindOne(ctx, bson.M{
+			"_id": lesson.AbsenceRecordID,
+		}).Decode(&absenceRecord)
+		if err == nil {
+			lessonResp.AbsenceDate = absenceRecord.AbsentOn
+		}
+
+		var extractedContent models.ExtractedContent
+		err = s.extractedContentCollection.FindOne(ctx, bson.M{
+			"_id": lesson.ExtractedContentID,
+		}).Decode(&extractedContent)
+		if err == nil {
+			lessonResp.WordCount = extractedContent.WordCount
+		}
+
+		response = append(response, lessonResp)
+	}
+
+	return response, nil
 }
