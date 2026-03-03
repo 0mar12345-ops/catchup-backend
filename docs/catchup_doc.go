@@ -69,6 +69,144 @@ func catchupSwaggerPaths() map[string]any {
 				},
 			},
 		},
+		"/api/catchup/course/{courseId}/student/{studentId}": map[string]any{
+			"get": map[string]any{
+				"summary":     "Get catch-up lesson for review",
+				"description": "Retrieves a catch-up lesson with all details for teacher review before delivery to student",
+				"produces":    []string{"application/json"},
+				"tags":        []string{"Catch-Up"},
+				"security": []map[string][]string{
+					{"Bearer": {}},
+				},
+				"parameters": []map[string]any{
+					{
+						"in":          "path",
+						"name":        "courseId",
+						"description": "Course ObjectID",
+						"required":    true,
+						"type":        "string",
+					},
+					{
+						"in":          "path",
+						"name":        "studentId",
+						"description": "Student ObjectID",
+						"required":    true,
+						"type":        "string",
+					},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "Catch-up lesson details",
+						"schema": map[string]any{
+							"$ref": "#/definitions/CatchUpLessonReview",
+						},
+					},
+					"401": map[string]any{
+						"description": "Unauthorized",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"403": map[string]any{
+						"description": "Forbidden - access denied",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"404": map[string]any{
+						"description": "Catch-up lesson not found",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"500": map[string]any{
+						"description": "Internal server error",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+		"/api/catchup/lesson/{lessonId}/deliver": map[string]any{
+			"post": map[string]any{
+				"summary":     "Deliver catch-up lesson to student",
+				"description": "Marks a catch-up lesson as delivered, making it available to the student",
+				"produces":    []string{"application/json"},
+				"tags":        []string{"Catch-Up"},
+				"security": []map[string][]string{
+					{"Bearer": {}},
+				},
+				"parameters": []map[string]any{
+					{
+						"in":          "path",
+						"name":        "lessonId",
+						"description": "Catch-up lesson ObjectID",
+						"required":    true,
+						"type":        "string",
+					},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "Lesson delivered successfully",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"message": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"401": map[string]any{
+						"description": "Unauthorized",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"403": map[string]any{
+						"description": "Forbidden - access denied",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"404": map[string]any{
+						"description": "Catch-up lesson not found",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"500": map[string]any{
+						"description": "Internal server error",
+						"schema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"error": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -125,6 +263,144 @@ func catchupSwaggerDefinitions() map[string]any {
 					"type":        "string",
 					"description": "Summary message of the operation",
 					"example":     "Successfully processed 2 student(s)",
+				},
+			},
+		},
+		"CatchUpLessonReview": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"lesson": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"_id": map[string]any{
+							"type": "string",
+						},
+						"courseId": map[string]any{
+							"type": "string",
+						},
+						"studentId": map[string]any{
+							"type": "string",
+						},
+						"absentDate": map[string]any{
+							"type":   "string",
+							"format": "date-time",
+						},
+						"explanation": map[string]any{
+							"type": "string",
+						},
+						"quiz": map[string]any{
+							"type": "array",
+							"items": map[string]any{
+								"$ref": "#/definitions/QuizQuestion",
+							},
+						},
+						"status": map[string]any{
+							"type": "string",
+							"enum": []string{"empty", "generated", "delivered", "completed"},
+						},
+						"createdAt": map[string]any{
+							"type":   "string",
+							"format": "date-time",
+						},
+						"updatedAt": map[string]any{
+							"type":   "string",
+							"format": "date-time",
+						},
+					},
+				},
+				"student": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"_id": map[string]any{
+							"type": "string",
+						},
+						"name": map[string]any{
+							"type": "string",
+						},
+						"email": map[string]any{
+							"type": "string",
+						},
+					},
+				},
+				"course": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"_id": map[string]any{
+							"type": "string",
+						},
+						"name": map[string]any{
+							"type": "string",
+						},
+					},
+				},
+				"contentAudit": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"totalItems": map[string]any{
+							"type": "integer",
+						},
+						"includedItems": map[string]any{
+							"type": "array",
+							"items": map[string]any{
+								"$ref": "#/definitions/ContentItem",
+							},
+						},
+						"excludedItems": map[string]any{
+							"type": "array",
+							"items": map[string]any{
+								"$ref": "#/definitions/ContentItem",
+							},
+						},
+					},
+				},
+				"warnings": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "string",
+					},
+				},
+			},
+		},
+		"QuizQuestion": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"question": map[string]any{
+					"type": "string",
+				},
+				"options": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "string",
+					},
+				},
+				"correctAnswer": map[string]any{
+					"type": "integer",
+				},
+				"explanation": map[string]any{
+					"type": "string",
+				},
+			},
+		},
+		"ContentItem": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"title": map[string]any{
+					"type": "string",
+				},
+				"type": map[string]any{
+					"type": "string",
+				},
+				"wordCount": map[string]any{
+					"type": "integer",
+				},
+				"extractedText": map[string]any{
+					"type": "string",
+				},
+				"excluded": map[string]any{
+					"type": "boolean",
+				},
+				"reason": map[string]any{
+					"type": "string",
 				},
 			},
 		},

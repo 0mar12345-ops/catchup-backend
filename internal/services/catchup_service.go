@@ -297,7 +297,7 @@ func (s *CatchUpService) processStudentCatchUp(
 		AbsenceRecordID:    absenceRecord.ID,
 		ExtractedContentID: extractedContent.ID,
 		Status:             models.CatchUpStatusEmpty,
-		Explanation:        "", // Will be filled by AI
+		Explanation:        "",
 		Quiz:               []models.QuizQuestion{},
 		RegenerationCount:  0,
 		CreatedAt:          now,
@@ -305,6 +305,34 @@ func (s *CatchUpService) processStudentCatchUp(
 	}
 
 	_, err = s.catchUpLessonsCollection.InsertOne(ctx, catchUpLesson)
+	if err != nil {
+		s.failIngestionJob(ctx, ingestionJob.ID, err.Error())
+		return err
+	}
+
+	// Generate AI content
+	aiContent, err := s.generateAIContent(ctx, extractedContent, course)
+	if err != nil {
+		// Don't fail the entire process, just log warning
+		s.failIngestionJob(ctx, ingestionJob.ID, fmt.Sprintf("AI generation failed: %v", err.Error()))
+		return err
+	}
+
+	// Update catch-up lesson with AI-generated content
+	generatedTime := time.Now().UTC()
+	_, err = s.catchUpLessonsCollection.UpdateOne(ctx,
+		bson.M{"_id": catchUpLesson.ID},
+		bson.M{"$set": bson.M{
+			"explanation":         aiContent.Explanation,
+			"learning_objectives": aiContent.LearningObjectives,
+			"quiz":                aiContent.Quiz,
+			"status":              models.CatchUpStatusGenerated,
+			"generation_model":    "gpt-4o-mini",
+			"prompt_version":      "v1.0",
+			"generated_at":        generatedTime,
+			"updated_at":          generatedTime,
+		}},
+	)
 	if err != nil {
 		s.failIngestionJob(ctx, ingestionJob.ID, err.Error())
 		return err
@@ -1101,4 +1129,129 @@ func (s *CatchUpService) extractAndCombineText(
 	}
 
 	return &extractedContent, nil
+}
+
+type AIGeneratedContent struct {
+	Explanation        string
+	LearningObjectives []string
+	Quiz               []models.QuizQuestion
+}
+
+func (s *CatchUpService) generateAIContent(ctx context.Context, extractedContent *models.ExtractedContent, course *models.Course) (*AIGeneratedContent, error) {
+	if s.config.OpenAIAPIKey == "" {
+		return nil, errors.New("OpenAI API key not configured")
+	}
+
+	client := openai.NewClient(s.config.OpenAIAPIKey)
+
+	prompt := fmt.Sprintf(`You are an educational AI assistant helping create a catch-up lesson for a student who missed class.
+
+Course: %s
+
+Content the student missed (extracted from class materials):
+%s
+
+Your task:
+1. Create a clear, structured explanation of what the student missed
+   - Format the explanation as clean, semantic HTML
+   - Use <h2> for main section headings
+   - Use <h3> for subsection headings
+   - Use <p> for paragraphs
+   - Use <ul> and <li> for bullet points
+   - Use <ol> and <li> for numbered lists
+   - Use <strong> for key terms or important concepts
+   - Use <em> for emphasis where appropriate
+   - Make it engaging and easy to understand
+   - Do NOT include any <script>, <style>, or potentially unsafe HTML tags
+
+2. Generate 5-7 learning objectives that the student should achieve after reviewing this content
+
+3. Create a quiz with 5-7 questions to check understanding
+   - Mix of multiple choice (4 options each) and short answer questions
+   - Questions should test comprehension of the key concepts
+   - Include the correct answer for each question
+
+Please respond in the following JSON format:
+{
+  "explanation": "<h2>Section Title</h2><p>Well-structured HTML explanation...</p><ul><li>Point 1</li></ul>",
+  "learning_objectives": ["Objective 1", "Objective 2", ...],
+  "quiz": [
+    {
+      "question": "Question text",
+      "type": "mcq",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "answer": "Option B"
+    },
+    {
+      "question": "Question text",
+      "type": "short_answer",
+      "answer": "Expected answer"
+    }
+  ]
+}
+
+IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic HTML tags to structure the content properly.`, course.Name, extractedContent.CombinedText)
+
+	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model: openai.GPT4oMini,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: "You are an expert educational content creator specializing in creating engaging catch-up lessons for students. Always respond with valid JSON.",
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: prompt,
+			},
+		},
+		Temperature: 0.7,
+		MaxTokens:   2000,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI API error: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, errors.New("no response from OpenAI")
+	}
+
+	content := resp.Choices[0].Message.Content
+
+	var aiResponse struct {
+		Explanation        string   `json:"explanation"`
+		LearningObjectives []string `json:"learning_objectives"`
+		Quiz               []struct {
+			Question string   `json:"question"`
+			Type     string   `json:"type"`
+			Options  []string `json:"options,omitempty"`
+			Answer   string   `json:"answer"`
+		} `json:"quiz"`
+	}
+
+	err = json.Unmarshal([]byte(content), &aiResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
+
+	quiz := make([]models.QuizQuestion, len(aiResponse.Quiz))
+	for i, q := range aiResponse.Quiz {
+		questionType := models.QuizQuestionMCQ
+		if q.Type == "short_answer" {
+			questionType = models.QuizQuestionShortAnswer
+		}
+
+		quiz[i] = models.QuizQuestion{
+			Question: q.Question,
+			Type:     questionType,
+			Options:  q.Options,
+			Answer:   q.Answer,
+		}
+	}
+
+	return &AIGeneratedContent{
+		Explanation:        aiResponse.Explanation,
+		LearningObjectives: aiResponse.LearningObjectives,
+		Quiz:               quiz,
+	}, nil
 }
