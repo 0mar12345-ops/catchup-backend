@@ -36,9 +36,11 @@ func buildSwaggerTemplate() (string, error) {
 	mergePaths(doc, schoolSwaggerPaths())
 	mergePaths(doc, userSwaggerPaths())
 	mergePaths(doc, courseSwaggerPaths())
+	mergePaths(doc, catchupSwaggerPaths())
 
 	mergeDefinitions(doc, schoolSwaggerDefinitions())
 	mergeDefinitions(doc, courseSwaggerDefinitions())
+	mergeDefinitions(doc, catchupSwaggerDefinitions())
 
 	bytes, err := json.Marshal(doc)
 	if err != nil {
