@@ -21,6 +21,8 @@ type Config struct {
 	GoogleOAuthState   string
 	FrontendURL        string
 
+	OpenAIAPIKey string
+
 	JWTSecret      string
 	JWTCookieName  string
 	JWTExpiryHours int
@@ -43,6 +45,8 @@ func LoadConfig() *Config {
 		GoogleRedirectURL:  getEnv("GOOGLE_REDIRECT_URL", "http://localhost:8080/api/users/oauth/google/callback"),
 		GoogleOAuthState:   getEnv("GOOGLE_OAUTH_STATE", "gclass-ai-state"),
 		FrontendURL:        getEnv("FRONTEND_URL", "http://localhost:3000"),
+
+		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
 
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-env"),
 		JWTCookieName:  getEnv("JWT_COOKIE_NAME", "gclass_token"),
