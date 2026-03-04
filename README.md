@@ -4,7 +4,7 @@ Google Classroom AI-powered catch-up lesson generator backend API.
 
 ## Prerequisites
 
-- Go 1.21+
+- Go 1.25.6
 - MongoDB
 - Google Cloud Project with Classroom & Drive APIs enabled
 - OpenAI API key
