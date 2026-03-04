@@ -17,8 +17,6 @@ import (
 	"github.com/jung-kurt/gofpdf"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 var (
@@ -33,6 +31,7 @@ type CatchUpViewService struct {
 	extractedContentCollection *mongo.Collection
 	contentItemsCollection     *mongo.Collection
 	oauthCollection            *mongo.Collection
+	userOAuthService           *UserOAuthService
 	config                     *config.Config
 }
 
@@ -48,7 +47,7 @@ type StudentCatchUpLessonResponse struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-func NewCatchUpViewService(client *mongo.Client, dbName string, cfg *config.Config) *CatchUpViewService {
+func NewCatchUpViewService(client *mongo.Client, dbName string, cfg *config.Config, userOAuthService *UserOAuthService) *CatchUpViewService {
 	db := client.Database(dbName)
 
 	return &CatchUpViewService{
@@ -58,6 +57,7 @@ func NewCatchUpViewService(client *mongo.Client, dbName string, cfg *config.Conf
 		extractedContentCollection: db.Collection("extracted_content"),
 		contentItemsCollection:     db.Collection("content_items"),
 		oauthCollection:            db.Collection("oauth_credentials"),
+		userOAuthService:           userOAuthService,
 		config:                     cfg,
 	}
 }
@@ -519,28 +519,8 @@ func (s *CatchUpViewService) createOAuthClient(ctx context.Context, oauthCred *m
 		return nil, errors.New("refresh token not found - user needs to re-authorize")
 	}
 
-	token := &oauth2.Token{
-		AccessToken:  oauthCred.AccessTokenEnc,
-		RefreshToken: oauthCred.RefreshTokenEnc,
-		TokenType:    "Bearer",
-	}
-	if oauthCred.AccessTokenExpiry != nil {
-		token.Expiry = *oauthCred.AccessTokenExpiry
-	}
-
-	oauthConfig := &oauth2.Config{
-		ClientID:     s.config.GoogleClientID,
-		ClientSecret: s.config.GoogleClientSecret,
-		Endpoint:     google.Endpoint,
-		Scopes: []string{
-			"https://www.googleapis.com/auth/classroom.courses.readonly",
-			"https://www.googleapis.com/auth/classroom.coursework.students",
-			"https://www.googleapis.com/auth/classroom.announcements",
-			"https://www.googleapis.com/auth/drive.file",
-		},
-	}
-
-	return oauthConfig.Client(ctx, token), nil
+	// Use centralized refresh method from UserOAuthService
+	return s.userOAuthService.RefreshOAuthToken(ctx, oauthCred)
 }
 
 func (s *CatchUpViewService) createClassroomAssignment(

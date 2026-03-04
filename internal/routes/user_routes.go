@@ -36,6 +36,8 @@ func registerUserRoutes(api *gin.RouterGroup, deps Dependencies) {
 		{
 			protected.GET("/me", oauthHandler.Me)
 			protected.POST("/logout", oauthHandler.Logout)
+			protected.GET("/oauth/status", oauthHandler.GetOAuthStatus)
+			protected.GET("/oauth/reauthorize", oauthHandler.GetReauthorizeURL)
 		}
 	}
 }

@@ -33,6 +33,7 @@ type OAuthCredential struct {
 	SchoolID          bson.ObjectID `bson:"school_id" json:"school_id"`
 	UserID            bson.ObjectID `bson:"user_id" json:"user_id"`
 	Provider          string        `bson:"provider" json:"provider"`
+	Status            string        `bson:"status" json:"status"` // "valid" or "invalid"
 	Scopes            []string      `bson:"scopes" json:"scopes"`
 	RefreshTokenEnc   string        `bson:"refresh_token_enc" json:"-"`
 	AccessTokenEnc    string        `bson:"access_token_enc,omitempty" json:"-"`

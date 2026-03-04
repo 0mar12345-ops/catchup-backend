@@ -99,6 +99,90 @@ func (s *UserOAuthService) FrontendURL() string {
 	return s.frontendURL
 }
 
+// RefreshOAuthToken refreshes an OAuth token and updates it in the database
+// If refresh fails (invalid refresh token), marks the credential as "invalid"
+// Returns updated OAuthCredential and http.Client, or error
+func (s *UserOAuthService) RefreshOAuthToken(ctx context.Context, oauthCred *models.OAuthCredential) (*http.Client, error) {
+	if oauthCred.RefreshTokenEnc == "" {
+		return nil, errors.New("refresh token not found - user needs to re-authorize")
+	}
+
+	// Create token from stored credentials
+	token := &oauth2.Token{
+		AccessToken:  oauthCred.AccessTokenEnc,
+		RefreshToken: oauthCred.RefreshTokenEnc,
+		TokenType:    "Bearer",
+	}
+	if oauthCred.AccessTokenExpiry != nil {
+		token.Expiry = *oauthCred.AccessTokenExpiry
+	}
+
+	// Get token source which will auto-refresh
+	tokenSource := s.config.TokenSource(ctx, token)
+
+	// Get fresh token (this will refresh if needed)
+	freshToken, err := tokenSource.Token()
+	if err != nil {
+		// Refresh failed - mark as invalid in database
+		fmt.Printf("Failed to refresh OAuth token for user %s: %v\n", oauthCred.UserID.Hex(), err)
+		_, updateErr := s.oauthCollection.UpdateOne(ctx,
+			bson.M{"_id": oauthCred.ID},
+			bson.M{"$set": bson.M{
+				"status":     "invalid",
+				"updated_at": time.Now().UTC(),
+			}},
+		)
+		if updateErr != nil {
+			fmt.Printf("Failed to mark OAuth credential as invalid: %v\n", updateErr)
+		}
+		return nil, fmt.Errorf("failed to refresh token - user needs to re-authorize: %w", err)
+	}
+
+	// Update token in database if it was refreshed
+	if freshToken.AccessToken != oauthCred.AccessTokenEnc {
+		fmt.Printf("OAuth token refreshed for user %s\n", oauthCred.UserID.Hex())
+		_, err = s.oauthCollection.UpdateOne(ctx,
+			bson.M{"_id": oauthCred.ID},
+			bson.M{"$set": bson.M{
+				"access_token_enc":    freshToken.AccessToken,
+				"access_token_expiry": freshToken.Expiry,
+				"refresh_token_enc":   freshToken.RefreshToken,
+				"status":              "valid",
+				"updated_at":          time.Now().UTC(),
+			}},
+		)
+		if err != nil {
+			fmt.Printf("Failed to update refreshed token in database: %v\n", err)
+			// Don't fail the request, just log it
+		}
+		// Update in-memory object
+		oauthCred.AccessTokenEnc = freshToken.AccessToken
+		oauthCred.AccessTokenExpiry = &freshToken.Expiry
+		oauthCred.RefreshTokenEnc = freshToken.RefreshToken
+		oauthCred.Status = "valid"
+	}
+
+	// Return HTTP client with the fresh token
+	client := s.config.Client(ctx, freshToken)
+	return client, nil
+}
+
+// GetOAuthCredential retrieves OAuth credentials for a user
+func (s *UserOAuthService) GetOAuthCredential(ctx context.Context, userID, schoolID bson.ObjectID) (*models.OAuthCredential, error) {
+	var oauthCred models.OAuthCredential
+	err := s.oauthCollection.FindOne(ctx, bson.M{
+		"school_id": schoolID,
+		"user_id":   userID,
+	}).Decode(&oauthCred)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("oauth credentials not found")
+		}
+		return nil, err
+	}
+	return &oauthCred, nil
+}
+
 func (s *UserOAuthService) CheckUserExistsByEmail(ctx context.Context, email string) (bool, error) {
 	count, err := s.usersCollection.CountDocuments(ctx, bson.M{"email": email})
 	if err != nil {
@@ -479,6 +563,7 @@ func (s *UserOAuthService) upsertOAuthCredential(
 			"refresh_token_enc":   token.RefreshToken,
 			"access_token_enc":    token.AccessToken,
 			"access_token_expiry": token.Expiry,
+			"status":              "valid",
 			"granted_at":          now,
 			"updated_at":          now,
 		},

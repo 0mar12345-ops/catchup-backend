@@ -12,6 +12,7 @@ import (
 	"github.com/0mar12345-ops/internal/services"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 type UserOAuthHandler struct {
@@ -148,6 +149,85 @@ func (h *UserOAuthHandler) Logout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(h.cookieName, "", -1, "/", h.cookieDomain, h.cookieSecure, true)
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
+}
+
+// GetOAuthStatus returns the current OAuth token status for the logged-in user
+func (h *UserOAuthHandler) GetOAuthStatus(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid school id"})
+		return
+	}
+
+	oauthCred, err := h.service.GetOAuthCredential(ctx, userOID, schoolOID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"status":       "not_found",
+			"has_oauth":    false,
+			"needs_reauth": true,
+			"message":      "No OAuth credentials found",
+		})
+		return
+	}
+
+	// Default to valid if status is empty (for backward compatibility)
+	status := oauthCred.Status
+	if status == "" {
+		status = "valid"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":       status,
+		"has_oauth":    true,
+		"needs_reauth": status == "invalid",
+		"granted_at":   oauthCred.GrantedAt,
+		"scopes_count": len(oauthCred.Scopes),
+	})
+}
+
+// GetReauthorizeURL returns the Google OAuth URL for re-authorization
+func (h *UserOAuthHandler) GetReauthorizeURL(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	// Force consent to ensure we get a fresh refresh token
+	authURL := h.service.GetGoogleAuthURLWithPrompt(true)
+
+	c.JSON(http.StatusOK, gin.H{
+		"auth_url": authURL,
+	})
 }
 
 func deriveCookieSettings(frontendURL string) (domain string, secure bool) {

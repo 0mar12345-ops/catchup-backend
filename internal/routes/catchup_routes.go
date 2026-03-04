@@ -8,10 +8,21 @@ import (
 )
 
 func registerCatchUpRoutes(api *gin.RouterGroup, deps Dependencies) {
-	catchUpService := services.NewCatchUpService(deps.MongoClient, deps.DBName, deps.Config)
+	// Create UserOAuthService to share across catchup services
+	userOAuthService := services.NewUserOAuthService(
+		deps.GoogleClientID,
+		deps.GoogleClientSecret,
+		deps.GoogleRedirectURL,
+		deps.GoogleOAuthState,
+		deps.FrontendURL,
+		deps.MongoClient,
+		deps.DBName,
+	)
+
+	catchUpService := services.NewCatchUpService(deps.MongoClient, deps.DBName, deps.Config, userOAuthService)
 	catchUpHandler := handlers.NewCatchUpHandler(catchUpService)
 
-	catchUpViewService := services.NewCatchUpViewService(deps.MongoClient, deps.DBName, deps.Config)
+	catchUpViewService := services.NewCatchUpViewService(deps.MongoClient, deps.DBName, deps.Config, userOAuthService)
 	catchUpViewHandler := handlers.NewCatchUpViewHandler(catchUpViewService)
 
 	authGuard := middleware.NewAuthGuard(deps.JWTSecret, deps.JWTCookieName)
