@@ -511,7 +511,8 @@ func (s *CatchUpService) fetchCourseWork(ctx context.Context, client *http.Clien
 				continue
 			}
 
-			if isSameDay(creationTime, targetDate) {
+			// Skip assignments created by our catch-up system
+			if isSameDay(creationTime, targetDate) && !isCatchUpAssignment(cw) {
 				allWork = append(allWork, cw)
 			}
 		}
@@ -874,6 +875,26 @@ func isSameDay(t1, t2 time.Time) bool {
 	y1, m1, d1 := t1.Date()
 	y2, m2, d2 := t2.Date()
 	return y1 == y2 && m1 == m2 && d1 == d2
+}
+
+// isCatchUpAssignment checks if a courseWork item was created by our catch-up system
+func isCatchUpAssignment(cw googleCourseWork) bool {
+	// Check if description starts with our catch-up template
+	if strings.HasPrefix(cw.Description, "Please review the attached PDF for the catch-up lesson") {
+		return true
+	}
+
+	// Check if any material has a PDF with the catch-up naming pattern
+	for _, material := range cw.Materials {
+		if material.DriveFile != nil {
+			title := material.DriveFile.DriveFile.Title
+			if strings.HasPrefix(title, "Catch-Up_") && strings.HasSuffix(title, ".pdf") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (s *CatchUpService) createOAuthClient(ctx context.Context, oauthCred *models.OAuthCredential) (*http.Client, error) {
