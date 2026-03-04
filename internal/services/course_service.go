@@ -3,10 +3,12 @@ package services
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/0mar12345-ops/internal/models"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var (
@@ -26,6 +28,7 @@ type CourseDashboardItem struct {
 	Source        string        `json:"source"`
 	IsArchived    bool          `json:"is_archived"`
 	TotalStudents int64         `json:"total_students"`
+	LastActivity  *time.Time    `json:"last_activity,omitempty"`
 }
 
 type CourseStudent struct {
@@ -49,18 +52,20 @@ type CourseWithStudents struct {
 }
 
 type CourseService struct {
-	coursesCollection     *mongo.Collection
-	enrollmentsCollection *mongo.Collection
-	studentsCollection    *mongo.Collection
+	coursesCollection        *mongo.Collection
+	enrollmentsCollection    *mongo.Collection
+	studentsCollection       *mongo.Collection
+	catchUpLessonsCollection *mongo.Collection
 }
 
 func NewCourseService(client *mongo.Client, dbName string) *CourseService {
 	db := client.Database(dbName)
 
 	return &CourseService{
-		coursesCollection:     db.Collection("courses"),
-		enrollmentsCollection: db.Collection("enrollments"),
-		studentsCollection:    db.Collection("students"),
+		coursesCollection:        db.Collection("courses"),
+		enrollmentsCollection:    db.Collection("enrollments"),
+		studentsCollection:       db.Collection("students"),
+		catchUpLessonsCollection: db.Collection("catchup_lessons"),
 	}
 }
 
@@ -100,6 +105,19 @@ func (s *CourseService) ListDashboardCourses(ctx context.Context, userID, school
 			totalStudents = int64(course.StudentCount)
 		}
 
+		// Get the most recent catch-up lesson activity for this course
+		var lastActivity *time.Time
+		var latestLesson struct {
+			UpdatedAt time.Time `bson:"updated_at"`
+		}
+		opts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})
+		err = s.catchUpLessonsCollection.FindOne(ctx, bson.M{
+			"course_id": course.ID,
+		}, opts).Decode(&latestLesson)
+		if err == nil {
+			lastActivity = &latestLesson.UpdatedAt
+		}
+
 		items = append(items, CourseDashboardItem{
 			ID:            course.ID,
 			Name:          course.Name,
@@ -110,6 +128,7 @@ func (s *CourseService) ListDashboardCourses(ctx context.Context, userID, school
 			Source:        string(course.Source),
 			IsArchived:    course.IsArchived,
 			TotalStudents: totalStudents,
+			LastActivity:  lastActivity,
 		})
 	}
 
