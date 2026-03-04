@@ -752,3 +752,110 @@ func (s *UserOAuthService) upsertEnrollment(
 	_, err := s.enrollmentsCollection.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
 	return err
 }
+
+func (s *UserOAuthService) SyncCoursesForUser(ctx context.Context, userID, schoolID string) (*OAuthSyncResult, error) {
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, ErrInvalidAuthUserID
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, ErrInvalidAuthSchoolID
+	}
+
+	// Get user's OAuth credentials
+	var oauthCred models.OAuthCredential
+	err = s.oauthCollection.FindOne(ctx, bson.M{
+		"school_id": schoolOID,
+		"user_id":   userOID,
+	}).Decode(&oauthCred)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("oauth credentials not found - please connect Google Classroom first")
+		}
+		return nil, err
+	}
+
+	// Create OAuth client
+	token := &oauth2.Token{
+		AccessToken:  oauthCred.AccessTokenEnc,
+		RefreshToken: oauthCred.RefreshTokenEnc,
+		TokenType:    "Bearer",
+	}
+
+	if oauthCred.AccessTokenExpiry != nil {
+		token.Expiry = *oauthCred.AccessTokenExpiry
+	}
+
+	client := s.config.Client(ctx, token)
+
+	// Fetch user info
+	userInfo, err := s.fetchGoogleUserInfo(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch user info: %w", err)
+	}
+
+	// Fetch courses
+	courses, err := s.fetchAllCourses(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch courses: %w", err)
+	}
+
+	now := time.Now().UTC()
+	studentSet := map[string]struct{}{}
+	coursesSynced := 0
+	enrollmentsSynced := 0
+
+	for _, gc := range courses {
+		course, err := s.upsertCourse(ctx, schoolOID, userOID, gc, now)
+		if err != nil {
+			continue
+		}
+		coursesSynced++
+
+		courseStudents, err := s.fetchAllCourseStudents(ctx, client, gc.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, gs := range courseStudents {
+			student, err := s.upsertStudent(ctx, schoolOID, gs, now)
+			if err != nil {
+				continue
+			}
+
+			if err := s.upsertEnrollment(ctx, schoolOID, course.ID, student.ID, now); err == nil {
+				enrollmentsSynced++
+			}
+
+			if gs.UserID != "" {
+				studentSet[gs.UserID] = struct{}{}
+			}
+		}
+	}
+
+	// Update the OAuth credential's expiry if token was refreshed
+	if oauthCred.AccessTokenExpiry != nil && token.Expiry.After(*oauthCred.AccessTokenExpiry) {
+		_, _ = s.oauthCollection.UpdateOne(ctx, bson.M{
+			"_id": oauthCred.ID,
+		}, bson.M{
+			"$set": bson.M{
+				"access_token_enc":    token.AccessToken,
+				"access_token_expiry": &token.Expiry,
+				"updated_at":          now,
+			},
+		})
+	}
+
+	return &OAuthSyncResult{
+		TeacherEmail:       userInfo.Email,
+		TeacherName:        userInfo.Name,
+		SchoolID:           schoolOID.Hex(),
+		UserID:             userOID.Hex(),
+		CoursesSynced:      coursesSynced,
+		StudentsSynced:     len(studentSet),
+		EnrollmentsSynced:  enrollmentsSynced,
+		GrantedScopesCount: len(oauthCred.Scopes),
+	}, nil
+}
