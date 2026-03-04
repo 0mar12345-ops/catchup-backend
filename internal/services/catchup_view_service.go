@@ -1249,3 +1249,89 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 		Quiz:               quiz,
 	}, nil
 }
+
+type CourseStats struct {
+	TotalStudents  int `json:"total_students"`
+	TotalAbsences  int `json:"total_absences"`
+	ReadyToDeliver int `json:"ready_to_deliver"`
+	TotalDelivered int `json:"total_delivered"`
+}
+
+func (s *CatchUpViewService) GetCourseStats(
+	ctx context.Context,
+	courseID, userID, schoolID string,
+) (*CourseStats, error) {
+
+	courseOID, err := bson.ObjectIDFromHex(courseID)
+	if err != nil {
+		return nil, errors.New("invalid course id")
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, errors.New("invalid school id")
+	}
+
+	// Verify course access
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":        courseOID,
+		"teacher_id": userOID,
+		"school_id":  schoolOID,
+	}).Decode(&course)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, ErrUnauthorizedAccess
+		}
+		return nil, err
+	}
+
+	// Get total students from enrollments
+	enrollmentsCollection := s.coursesCollection.Database().Collection("enrollments")
+	totalStudents, err := enrollmentsCollection.CountDocuments(ctx, bson.M{
+		"school_id": schoolOID,
+		"course_id": courseOID,
+		"status":    models.EnrollmentActive,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Count total absences (all catchup lessons for this course)
+	totalAbsences, err := s.catchUpLessonsCollection.CountDocuments(ctx, bson.M{
+		"course_id": courseOID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Count ready to deliver (status = generated)
+	readyToDeliver, err := s.catchUpLessonsCollection.CountDocuments(ctx, bson.M{
+		"course_id": courseOID,
+		"status":    models.CatchUpStatusGenerated,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Count delivered
+	totalDelivered, err := s.catchUpLessonsCollection.CountDocuments(ctx, bson.M{
+		"course_id": courseOID,
+		"status":    models.CatchUpStatusDelivered,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &CourseStats{
+		TotalStudents:  int(totalStudents),
+		TotalAbsences:  int(totalAbsences),
+		ReadyToDeliver: int(readyToDeliver),
+		TotalDelivered: int(totalDelivered),
+	}, nil
+}
