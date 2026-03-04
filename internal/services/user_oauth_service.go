@@ -859,3 +859,137 @@ func (s *UserOAuthService) SyncCoursesForUser(ctx context.Context, userID, schoo
 		GrantedScopesCount: len(oauthCred.Scopes),
 	}, nil
 }
+
+func (s *UserOAuthService) SyncCourseStudents(ctx context.Context, courseID, userID, schoolID string) (*OAuthSyncResult, error) {
+	courseOID, err := bson.ObjectIDFromHex(courseID)
+	if err != nil {
+		return nil, errors.New("invalid course id")
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, ErrInvalidAuthUserID
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, ErrInvalidAuthSchoolID
+	}
+
+	// Verify course access
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":        courseOID,
+		"school_id":  schoolOID,
+		"teacher_id": userOID,
+	}).Decode(&course)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("course not found or access denied")
+		}
+		return nil, err
+	}
+
+	// Get external course ID
+	var externalCourseID string
+	for _, ref := range course.ExternalRefs {
+		if ref.Provider == models.ProviderGoogleClassroom {
+			externalCourseID = ref.ExternalID
+			break
+		}
+	}
+	if externalCourseID == "" {
+		return nil, errors.New("course not synced from Google Classroom")
+	}
+
+	// Get user's OAuth credentials
+	var oauthCred models.OAuthCredential
+	err = s.oauthCollection.FindOne(ctx, bson.M{
+		"school_id": schoolOID,
+		"user_id":   userOID,
+	}).Decode(&oauthCred)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("oauth credentials not found - please connect Google Classroom first")
+		}
+		return nil, err
+	}
+
+	// Create OAuth client
+	token := &oauth2.Token{
+		AccessToken:  oauthCred.AccessTokenEnc,
+		RefreshToken: oauthCred.RefreshTokenEnc,
+		TokenType:    "Bearer",
+	}
+
+	if oauthCred.AccessTokenExpiry != nil {
+		token.Expiry = *oauthCred.AccessTokenExpiry
+	}
+
+	client := s.config.Client(ctx, token)
+
+	// Fetch user info
+	userInfo, err := s.fetchGoogleUserInfo(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch user info: %w", err)
+	}
+
+	// Fetch course students
+	courseStudents, err := s.fetchAllCourseStudents(ctx, client, externalCourseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch course students: %w", err)
+	}
+
+	now := time.Now().UTC()
+	studentSet := map[string]struct{}{}
+	enrollmentsSynced := 0
+
+	for _, gs := range courseStudents {
+		student, err := s.upsertStudent(ctx, schoolOID, gs, now)
+		if err != nil {
+			continue
+		}
+
+		if err := s.upsertEnrollment(ctx, schoolOID, courseOID, student.ID, now); err == nil {
+			enrollmentsSynced++
+		}
+
+		if gs.UserID != "" {
+			studentSet[gs.UserID] = struct{}{}
+		}
+	}
+
+	// Update course student count
+	_, _ = s.coursesCollection.UpdateOne(ctx, bson.M{
+		"_id": courseOID,
+	}, bson.M{
+		"$set": bson.M{
+			"student_count": enrollmentsSynced,
+			"updated_at":    now,
+		},
+	})
+
+	// Update the OAuth credential's expiry if token was refreshed
+	if oauthCred.AccessTokenExpiry != nil && token.Expiry.After(*oauthCred.AccessTokenExpiry) {
+		_, _ = s.oauthCollection.UpdateOne(ctx, bson.M{
+			"_id": oauthCred.ID,
+		}, bson.M{
+			"$set": bson.M{
+				"access_token_enc":    token.AccessToken,
+				"access_token_expiry": &token.Expiry,
+				"updated_at":          now,
+			},
+		})
+	}
+
+	return &OAuthSyncResult{
+		TeacherEmail:       userInfo.Email,
+		TeacherName:        userInfo.Name,
+		SchoolID:           schoolOID.Hex(),
+		UserID:             userOID.Hex(),
+		CoursesSynced:      1,
+		StudentsSynced:     len(studentSet),
+		EnrollmentsSynced:  enrollmentsSynced,
+		GrantedScopesCount: len(oauthCred.Scopes),
+	}, nil
+}

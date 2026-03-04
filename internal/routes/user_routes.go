@@ -39,6 +39,7 @@ func registerUserRoutes(api *gin.RouterGroup, deps Dependencies) {
 			protected.GET("/oauth/status", oauthHandler.GetOAuthStatus)
 			protected.GET("/oauth/reauthorize", oauthHandler.GetReauthorizeURL)
 			protected.POST("/sync-courses", oauthHandler.SyncCourses)
+			protected.POST("/sync-course/:courseId/students", oauthHandler.SyncCourseStudents)
 		}
 	}
 }

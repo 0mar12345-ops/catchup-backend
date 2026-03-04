@@ -297,3 +297,31 @@ func (h *UserOAuthHandler) SyncCourses(c *gin.Context) {
 
 	c.JSON(http.StatusOK, result)
 }
+
+func (h *UserOAuthHandler) SyncCourseStudents(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	courseID := c.Param("courseId")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := h.service.SyncCourseStudents(ctx, courseID, userID, schoolID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
