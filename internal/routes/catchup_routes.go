@@ -35,5 +35,6 @@ func registerCatchUpRoutes(api *gin.RouterGroup, deps Dependencies) {
 		catchup.GET("/course/:courseId/student/:studentId", catchUpViewHandler.GetCatchUpLesson)
 		catchup.GET("/lesson/:lessonId", catchUpViewHandler.GetCatchUpLessonById)
 		catchup.POST("/lesson/:lessonId/deliver", catchUpViewHandler.DeliverCatchUpLesson)
+		catchup.POST("/lesson/:lessonId/regenerate", catchUpViewHandler.RegenerateCatchUpLesson)
 	}
 }

@@ -169,3 +169,54 @@ func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "lesson delivered successfully"})
 }
+
+func (h *CatchUpViewHandler) RegenerateCatchUpLesson(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	lessonID := c.Param("lessonId")
+
+	var req struct {
+		RegenerationType string  `json:"regeneration_type"` // "full", "explanation", "quiz"
+		CustomPrompt     *string `json:"custom_prompt"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	// Validate regeneration type
+	if req.RegenerationType != "full" && req.RegenerationType != "explanation" && req.RegenerationType != "quiz" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid regeneration_type. Must be 'full', 'explanation', or 'quiz'"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	lesson, err := h.service.RegenerateCatchUpLesson(ctx, lessonID, userID, schoolID, req.RegenerationType, req.CustomPrompt)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrCatchUpLessonNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "catch-up lesson not found"})
+		case errors.Is(err, services.ErrUnauthorizedAccess):
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to regenerate lesson", "details": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, lesson)
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/0mar12345-ops/config"
 	"github.com/0mar12345-ops/internal/models"
 	"github.com/jung-kurt/gofpdf"
+	openai "github.com/sashabaranov/go-openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -894,4 +895,357 @@ func (s *CatchUpViewService) uploadPDFToDrive(ctx context.Context, client *http.
 	}
 
 	return fileID, nil
+}
+
+func (s *CatchUpViewService) RegenerateCatchUpLesson(
+	ctx context.Context,
+	lessonID, userID, schoolID, regenerationType string,
+	customPrompt *string,
+) (*CatchUpLessonReviewResponse, error) {
+
+	lessonOID, err := bson.ObjectIDFromHex(lessonID)
+	if err != nil {
+		return nil, errors.New("invalid lesson id")
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, errors.New("invalid school id")
+	}
+
+	// Fetch the lesson
+	var lesson models.CatchUpLesson
+	err = s.catchUpLessonsCollection.FindOne(ctx, bson.M{"_id": lessonOID}).Decode(&lesson)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, ErrCatchUpLessonNotFound
+		}
+		return nil, err
+	}
+
+	// Verify authorization
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":        lesson.CourseID,
+		"school_id":  schoolOID,
+		"teacher_id": userOID,
+	}).Decode(&course)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUnauthorizedAccess
+		}
+		return nil, err
+	}
+
+	// Prevent regeneration if already delivered
+	if lesson.Status == models.CatchUpStatusDelivered || lesson.Status == models.CatchUpStatusCompleted {
+		return nil, errors.New("cannot regenerate a lesson that has been delivered to student")
+	}
+
+	// Get extracted content for this lesson
+	var extractedContent models.ExtractedContent
+	err = s.extractedContentCollection.FindOne(ctx, bson.M{
+		"_id": lesson.ExtractedContentID,
+	}).Decode(&extractedContent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find extracted content: %w", err)
+	}
+
+	// Get student info
+	var student models.Student
+	err = s.studentsCollection.FindOne(ctx, bson.M{"_id": lesson.StudentID}).Decode(&student)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find student: %w", err)
+	}
+
+	// Regenerate AI content based on type
+	fmt.Printf("Regenerating %s for lesson %s with temperature 1.0\n", regenerationType, lessonID)
+
+	var newTitle string
+	var newExplanation string
+	var newQuiz []models.QuizQuestion
+
+	if regenerationType == "full" || regenerationType == "explanation" {
+		// Regenerate explanation (and title if full)
+		aiContent, err := s.regenerateAIContent(ctx, &extractedContent, &course, regenerationType, customPrompt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to regenerate AI content: %w", err)
+		}
+
+		if regenerationType == "full" {
+			newTitle = aiContent.Title
+			newExplanation = aiContent.Explanation
+			newQuiz = aiContent.Quiz
+		} else {
+			// Keep existing title and quiz, only update explanation
+			newTitle = lesson.Title
+			newExplanation = aiContent.Explanation
+			newQuiz = lesson.Quiz
+		}
+	}
+
+	if regenerationType == "quiz" {
+		// Regenerate only quiz
+		aiContent, err := s.regenerateAIContent(ctx, &extractedContent, &course, regenerationType, customPrompt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to regenerate quiz: %w", err)
+		}
+
+		newTitle = lesson.Title
+		newExplanation = lesson.Explanation
+		newQuiz = aiContent.Quiz
+	}
+
+	// Update the lesson in database
+	now := time.Now().UTC()
+	update := bson.M{
+		"$set": bson.M{
+			"title":        newTitle,
+			"explanation":  newExplanation,
+			"quiz":         newQuiz,
+			"updated_at":   now,
+			"generated_at": now,
+		},
+	}
+
+	_, err = s.catchUpLessonsCollection.UpdateOne(ctx, bson.M{"_id": lessonOID}, update)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update lesson: %w", err)
+	}
+
+	// Build content audit
+	contentAudit := ContentAudit{
+		Included: []string{},
+		Excluded: []string{},
+	}
+
+	cursor, err := s.contentItemsCollection.Find(ctx, bson.M{
+		"ingestion_job_id": extractedContent.IngestionJobID,
+	})
+	if err == nil {
+		defer cursor.Close(ctx)
+		for cursor.Next(ctx) {
+			var item models.ContentItem
+			if err := cursor.Decode(&item); err == nil {
+				if item.Included {
+					contentAudit.Included = append(contentAudit.Included, item.Title)
+				} else {
+					reason := "Unknown reason"
+					if len(item.ExcludedNotes) > 0 {
+						reason = item.ExcludedNotes[0]
+					}
+					contentAudit.Excluded = append(contentAudit.Excluded, fmt.Sprintf("%s (%s)", item.Title, reason))
+				}
+			}
+		}
+	}
+
+	// Return the updated lesson
+	return &CatchUpLessonReviewResponse{
+		LessonID:     lessonID,
+		StudentID:    lesson.StudentID.Hex(),
+		StudentName:  student.Name,
+		CourseID:     lesson.CourseID.Hex(),
+		CourseName:   course.Name,
+		Status:       string(lesson.Status),
+		Title:        newTitle,
+		Explanation:  newExplanation,
+		Quiz:         newQuiz,
+		ContentAudit: contentAudit,
+		WordCount:    extractedContent.WordCount,
+		Warnings:     extractedContent.Warnings,
+		GeneratedAt:  &now,
+		DeliveredAt:  lesson.DeliveredAt,
+		CreatedAt:    lesson.CreatedAt,
+	}, nil
+}
+
+func (s *CatchUpViewService) regenerateAIContent(
+	ctx context.Context,
+	extractedContent *models.ExtractedContent,
+	course *models.Course,
+	regenerationType string,
+	customPrompt *string,
+) (*AIGeneratedContent, error) {
+	if s.config.OpenAIAPIKey == "" {
+		return nil, errors.New("OpenAI API key not configured")
+	}
+
+	fmt.Printf("Regenerating AI content (%s) for course: %s, word count: %d\n", regenerationType, course.Name, extractedContent.WordCount)
+
+	client := openai.NewClient(s.config.OpenAIAPIKey)
+
+	var taskInstructions string
+	switch regenerationType {
+	case "full":
+		taskInstructions = `Your task:
+1. Create a concise, engaging title for this catch-up lesson (max 60 characters)
+   - Should clearly indicate the topic covered
+   - Make it student-friendly and descriptive
+
+2. Create a clear, structured explanation of what the student missed
+   - Format the explanation as clean, semantic HTML
+   - Use <h2> for main section headings
+   - Use <h3> for subsection headings
+   - Use <p> for paragraphs
+   - Use <ul> and <li> for bullet points
+   - Use <ol> and <li> for numbered lists
+   - Use <strong> for key terms or important concepts
+   - Use <em> for emphasis where appropriate
+   - Make it engaging and easy to understand
+   - Do NOT include any <script>, <style>, or potentially unsafe HTML tags
+
+3. Generate 5-7 learning objectives that the student should achieve after reviewing this content
+
+4. Create a quiz with 5-7 questions to check understanding
+   - Mix of multiple choice (4 options each) and short answer questions
+   - Questions should test comprehension of the key concepts
+   - Include the correct answer for each question`
+
+	case "explanation":
+		taskInstructions = `Your task:
+1. Keep the same title (will be ignored in response)
+
+2. Create a NEW, clear, structured explanation of what the student missed
+   - Format the explanation as clean, semantic HTML
+   - Use <h2> for main section headings
+   - Use <h3> for subsection headings
+   - Use <p> for paragraphs
+   - Use <ul> and <li> for bullet points
+   - Use <ol> and <li> for numbered lists
+   - Use <strong> for key terms or important concepts
+   - Use <em> for emphasis where appropriate
+   - Make it engaging and easy to understand
+   - Present the information from a DIFFERENT ANGLE or with DIFFERENT EXAMPLES than before
+   - Do NOT include any <script>, <style>, or potentially unsafe HTML tags
+
+3. Generate 5-7 learning objectives (will be ignored in response)
+
+4. Keep the same quiz (will be ignored in response)`
+
+	case "quiz":
+		taskInstructions = `Your task:
+1. Keep the same title (will be ignored in response)
+
+2. Keep the same explanation (will be ignored in response)
+
+3. Generate 5-7 learning objectives (will be ignored in response)
+
+4. Create a COMPLETELY NEW quiz with 5-7 DIFFERENT questions to check understanding
+   - Mix of multiple choice (4 options each) and short answer questions
+   - Questions should test comprehension of the key concepts from DIFFERENT ANGLES
+   - Include the correct answer for each question
+   - Make questions unique and not overlapping with previous quiz`
+	}
+
+	promptAddition := ""
+	systemPromptAddition := ""
+	if customPrompt != nil && *customPrompt != "" {
+		promptAddition = fmt.Sprintf("\n\n⚠️ CRITICAL TEACHER REQUIREMENTS (MUST FOLLOW):\n%s\n\nThese requirements take precedence over any conflicting instructions above.", *customPrompt)
+		systemPromptAddition = fmt.Sprintf(" IMPORTANT: The teacher has provided specific requirements that MUST be followed exactly: %s", *customPrompt)
+	}
+
+	prompt := fmt.Sprintf(`You are an educational AI assistant helping create a catch-up lesson for a student who missed class.
+
+Course: %s
+
+Content the student missed (extracted from class materials):
+%s
+
+%s%s
+
+Please respond in the following JSON format:
+{
+  "title": "Concise lesson title",
+  "explanation": "<h2>Section Title</h2><p>Well-structured HTML explanation...</p><ul><li>Point 1</li></ul>",
+  "learning_objectives": ["Objective 1", "Objective 2", ...],
+  "quiz": [
+    {
+      "question": "Question text",
+      "type": "mcq",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "answer": "Option B"
+    },
+    {
+      "question": "Question text",
+      "type": "short_answer",
+      "answer": "Expected answer"
+    }
+  ]
+}
+
+IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic HTML tags to structure the content properly.`, course.Name, extractedContent.CombinedText, taskInstructions, promptAddition)
+
+	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model: openai.GPT4oMini,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: fmt.Sprintf("You are an expert educational content creator specializing in creating engaging catch-up lessons for students. Always wrap your JSON response in a code block starting with ```json and ending with ```. When regenerating content, ensure it's unique and different from previous versions.%s", systemPromptAddition),
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: prompt,
+			},
+		},
+		Temperature: 1.0, // Higher temperature for more creativity and uniqueness
+		MaxTokens:   2000,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI API error: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, errors.New("no response from OpenAI")
+	}
+
+	content := resp.Choices[0].Message.Content
+	fmt.Printf("Received OpenAI regeneration response, length: %d bytes\n", len(content))
+
+	// Strip the ```json ... ``` code block wrapper
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var aiResponse struct {
+		Title              string   `json:"title"`
+		Explanation        string   `json:"explanation"`
+		LearningObjectives []string `json:"learning_objectives"`
+		Quiz               []struct {
+			Question string   `json:"question"`
+			Type     string   `json:"type"`
+			Options  []string `json:"options,omitempty"`
+			Answer   string   `json:"answer"`
+		} `json:"quiz"`
+	}
+
+	err = json.Unmarshal([]byte(content), &aiResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
+
+	// Convert quiz format
+	quiz := make([]models.QuizQuestion, len(aiResponse.Quiz))
+	for i, q := range aiResponse.Quiz {
+		quiz[i] = models.QuizQuestion{
+			Question: q.Question,
+			Type:     models.QuizQuestionType(q.Type),
+			Options:  q.Options,
+			Answer:   q.Answer,
+		}
+	}
+
+	return &AIGeneratedContent{
+		Title:              aiResponse.Title,
+		Explanation:        aiResponse.Explanation,
+		LearningObjectives: aiResponse.LearningObjectives,
+		Quiz:               quiz,
+	}, nil
 }
