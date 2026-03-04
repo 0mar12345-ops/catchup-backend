@@ -179,6 +179,95 @@ func (s *CatchUpViewService) GetCatchUpLessonForReview(
 	return response, nil
 }
 
+func (s *CatchUpViewService) GetCatchUpLessonByID(
+	ctx context.Context,
+	lessonID, userID, schoolID string,
+) (*CatchUpLessonReviewResponse, error) {
+
+	lessonOID, err := bson.ObjectIDFromHex(lessonID)
+	if err != nil {
+		return nil, errors.New("invalid lesson id")
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, errors.New("invalid school id")
+	}
+
+	var lesson models.CatchUpLesson
+	err = s.catchUpLessonsCollection.FindOne(ctx, bson.M{
+		"_id":       lessonOID,
+		"school_id": schoolOID,
+	}).Decode(&lesson)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrCatchUpLessonNotFound
+		}
+		return nil, err
+	}
+
+	// Verify the teacher has access to this course
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":        lesson.CourseID,
+		"school_id":  schoolOID,
+		"teacher_id": userOID,
+	}).Decode(&course)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUnauthorizedAccess
+		}
+		return nil, err
+	}
+
+	var student models.Student
+	err = s.studentsCollection.FindOne(ctx, bson.M{
+		"_id":       lesson.StudentID,
+		"school_id": schoolOID,
+	}).Decode(&student)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("student not found")
+		}
+		return nil, err
+	}
+
+	var extractedContent models.ExtractedContent
+	err = s.extractedContentCollection.FindOne(ctx, bson.M{
+		"_id": lesson.ExtractedContentID,
+	}).Decode(&extractedContent)
+	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, err
+	}
+
+	contentAudit := s.buildContentAudit(ctx, extractedContent)
+
+	response := &CatchUpLessonReviewResponse{
+		LessonID:     lesson.ID.Hex(),
+		StudentID:    student.ID.Hex(),
+		StudentName:  student.Name,
+		CourseID:     course.ID.Hex(),
+		CourseName:   course.Name,
+		Status:       string(lesson.Status),
+		Title:        lesson.Title,
+		Explanation:  lesson.Explanation,
+		Quiz:         lesson.Quiz,
+		ContentAudit: contentAudit,
+		WordCount:    extractedContent.WordCount,
+		Warnings:     extractedContent.Warnings,
+		GeneratedAt:  lesson.GeneratedAt,
+		DeliveredAt:  lesson.DeliveredAt,
+		CreatedAt:    lesson.CreatedAt,
+	}
+
+	return response, nil
+}
+
 func (s *CatchUpViewService) buildContentAudit(ctx context.Context, extractedContent models.ExtractedContent) ContentAudit {
 	included := []string{}
 	excluded := []string{}

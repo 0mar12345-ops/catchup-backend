@@ -89,6 +89,41 @@ func (h *CatchUpViewHandler) GetCatchUpLesson(c *gin.Context) {
 	c.JSON(http.StatusOK, lesson)
 }
 
+func (h *CatchUpViewHandler) GetCatchUpLessonById(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	lessonID := c.Param("lessonId")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	lesson, err := h.service.GetCatchUpLessonByID(ctx, lessonID, userID, schoolID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrCatchUpLessonNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "catch-up lesson not found"})
+		case errors.Is(err, services.ErrUnauthorizedAccess):
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch catch-up lesson"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, lesson)
+}
+
 func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 	claims, ok := middleware.GetAuthClaims(c)
 	if !ok {
