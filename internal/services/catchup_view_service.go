@@ -386,6 +386,11 @@ func (s *CatchUpViewService) DeliverCatchUpLesson(
 		return fmt.Errorf("failed to find absence record: %w", err)
 	}
 
+	// Update title if provided (before creating assignment so it's used in PDF and assignment)
+	if title != nil && *title != "" {
+		lesson.Title = *title
+	}
+
 	// Create Google Classroom assignment
 	assignmentID, assignmentLink, err := s.createClassroomAssignment(ctx, &oauthCred, &course, &student, &lesson, absenceRecord.AbsentOn, dueDate)
 	if err != nil {
@@ -402,10 +407,9 @@ func (s *CatchUpViewService) DeliverCatchUpLesson(
 		"classroom_assignment_link": assignmentLink,
 	}
 
-	// Update title if provided
+	// Include title in database update if it was provided
 	if title != nil && *title != "" {
 		updateFields["title"] = *title
-		lesson.Title = *title
 	}
 
 	_, err = s.catchUpLessonsCollection.UpdateOne(ctx,
