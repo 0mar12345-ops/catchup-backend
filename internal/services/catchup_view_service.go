@@ -36,15 +36,17 @@ type CatchUpViewService struct {
 }
 
 type StudentCatchUpLessonResponse struct {
-	ID          string    `json:"id"`
-	StudentID   string    `json:"student_id"`
-	CourseID    string    `json:"course_id"`
-	AbsenceDate time.Time `json:"absence_date"`
-	Status      string    `json:"status"`
-	Title       string    `json:"title"`
-	WordCount   int       `json:"word_count,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                      string    `json:"id"`
+	StudentID               string    `json:"student_id"`
+	CourseID                string    `json:"course_id"`
+	AbsenceDate             time.Time `json:"absence_date"`
+	Status                  string    `json:"status"`
+	Title                   string    `json:"title"`
+	WordCount               int       `json:"word_count,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
+	HasDuplicateDate        bool      `json:"has_duplicate_date"`
+	AlreadyDeliveredForDate bool      `json:"already_delivered_for_date"`
 }
 
 func NewCatchUpViewService(client *mongo.Client, dbName string, cfg *config.Config, userOAuthService *UserOAuthService) *CatchUpViewService {
@@ -63,21 +65,22 @@ func NewCatchUpViewService(client *mongo.Client, dbName string, cfg *config.Conf
 }
 
 type CatchUpLessonReviewResponse struct {
-	LessonID     string                `json:"lesson_id"`
-	StudentID    string                `json:"student_id"`
-	StudentName  string                `json:"student_name"`
-	CourseID     string                `json:"course_id"`
-	CourseName   string                `json:"course_name"`
-	Status       string                `json:"status"`
-	Title        string                `json:"title"`
-	Explanation  string                `json:"explanation"`
-	Quiz         []models.QuizQuestion `json:"quiz"`
-	ContentAudit ContentAudit          `json:"content_audit"`
-	WordCount    int                   `json:"word_count"`
-	Warnings     []string              `json:"warnings,omitempty"`
-	GeneratedAt  *time.Time            `json:"generated_at,omitempty"`
-	DeliveredAt  *time.Time            `json:"delivered_at,omitempty"`
-	CreatedAt    time.Time             `json:"created_at"`
+	LessonID                string                `json:"lesson_id"`
+	StudentID               string                `json:"student_id"`
+	StudentName             string                `json:"student_name"`
+	CourseID                string                `json:"course_id"`
+	CourseName              string                `json:"course_name"`
+	Status                  string                `json:"status"`
+	Title                   string                `json:"title"`
+	Explanation             string                `json:"explanation"`
+	Quiz                    []models.QuizQuestion `json:"quiz"`
+	ContentAudit            ContentAudit          `json:"content_audit"`
+	WordCount               int                   `json:"word_count"`
+	Warnings                []string              `json:"warnings,omitempty"`
+	GeneratedAt             *time.Time            `json:"generated_at,omitempty"`
+	DeliveredAt             *time.Time            `json:"delivered_at,omitempty"`
+	CreatedAt               time.Time             `json:"created_at"`
+	AlreadyDeliveredForDate bool                  `json:"already_delivered_for_date"`
 }
 
 type ContentAudit struct {
@@ -245,24 +248,69 @@ func (s *CatchUpViewService) GetCatchUpLessonByID(
 		return nil, err
 	}
 
+	// Check if any other lesson for the same absence date has been delivered
+	var absenceRecord models.AbsenceRecord
+	err = s.catchUpLessonsCollection.Database().Collection("absence_records").FindOne(ctx, bson.M{
+		"_id": lesson.AbsenceRecordID,
+	}).Decode(&absenceRecord)
+
+	alreadyDeliveredForDate := false
+	if err == nil {
+		absenceDate := absenceRecord.AbsentOn.Truncate(24 * time.Hour)
+
+		// Find all lessons for this student on the same absence date
+		var allLessonsForDate []models.CatchUpLesson
+		cursor, err := s.catchUpLessonsCollection.Find(ctx, bson.M{
+			"school_id":  schoolOID,
+			"course_id":  lesson.CourseID,
+			"student_id": lesson.StudentID,
+		})
+		if err == nil {
+			defer cursor.Close(ctx)
+			cursor.All(ctx, &allLessonsForDate)
+
+			for _, otherLesson := range allLessonsForDate {
+				// Skip the current lesson
+				if otherLesson.ID == lesson.ID {
+					continue
+				}
+
+				// Check if this other lesson is for the same date and has been delivered
+				var otherAbsenceRecord models.AbsenceRecord
+				err := s.catchUpLessonsCollection.Database().Collection("absence_records").FindOne(ctx, bson.M{
+					"_id": otherLesson.AbsenceRecordID,
+				}).Decode(&otherAbsenceRecord)
+
+				if err == nil {
+					otherDate := otherAbsenceRecord.AbsentOn.Truncate(24 * time.Hour)
+					if otherDate.Equal(absenceDate) && otherLesson.Status == models.CatchUpStatusDelivered {
+						alreadyDeliveredForDate = true
+						break
+					}
+				}
+			}
+		}
+	}
+
 	contentAudit := s.buildContentAudit(ctx, extractedContent)
 
 	response := &CatchUpLessonReviewResponse{
-		LessonID:     lesson.ID.Hex(),
-		StudentID:    student.ID.Hex(),
-		StudentName:  student.Name,
-		CourseID:     course.ID.Hex(),
-		CourseName:   course.Name,
-		Status:       string(lesson.Status),
-		Title:        lesson.Title,
-		Explanation:  lesson.Explanation,
-		Quiz:         lesson.Quiz,
-		ContentAudit: contentAudit,
-		WordCount:    extractedContent.WordCount,
-		Warnings:     extractedContent.Warnings,
-		GeneratedAt:  lesson.GeneratedAt,
-		DeliveredAt:  lesson.DeliveredAt,
-		CreatedAt:    lesson.CreatedAt,
+		LessonID:                lesson.ID.Hex(),
+		StudentID:               student.ID.Hex(),
+		StudentName:             student.Name,
+		CourseID:                course.ID.Hex(),
+		CourseName:              course.Name,
+		Status:                  string(lesson.Status),
+		Title:                   lesson.Title,
+		Explanation:             lesson.Explanation,
+		Quiz:                    lesson.Quiz,
+		ContentAudit:            contentAudit,
+		WordCount:               extractedContent.WordCount,
+		Warnings:                extractedContent.Warnings,
+		GeneratedAt:             lesson.GeneratedAt,
+		DeliveredAt:             lesson.DeliveredAt,
+		CreatedAt:               lesson.CreatedAt,
+		AlreadyDeliveredForDate: alreadyDeliveredForDate,
 	}
 
 	return response, nil
@@ -484,6 +532,24 @@ func (s *CatchUpViewService) GetStudentCatchUpLessons(
 		return nil, err
 	}
 
+	// Build a map of absence dates to detect duplicates and track delivered status
+	absenceDateMap := make(map[time.Time][]models.CatchUpLesson)
+	absenceDateDelivered := make(map[time.Time]bool)
+
+	for _, lesson := range lessons {
+		var absenceRecord models.AbsenceRecord
+		err := s.catchUpLessonsCollection.Database().Collection("absence_records").FindOne(ctx, bson.M{
+			"_id": lesson.AbsenceRecordID,
+		}).Decode(&absenceRecord)
+		if err == nil {
+			absenceDate := absenceRecord.AbsentOn.Truncate(24 * time.Hour)
+			absenceDateMap[absenceDate] = append(absenceDateMap[absenceDate], lesson)
+			if lesson.Status == models.CatchUpStatusDelivered {
+				absenceDateDelivered[absenceDate] = true
+			}
+		}
+	}
+
 	response := make([]StudentCatchUpLessonResponse, 0, len(lessons))
 	for _, lesson := range lessons {
 		lessonResp := StudentCatchUpLessonResponse{
@@ -502,6 +568,17 @@ func (s *CatchUpViewService) GetStudentCatchUpLessons(
 		}).Decode(&absenceRecord)
 		if err == nil {
 			lessonResp.AbsenceDate = absenceRecord.AbsentOn
+			absenceDate := absenceRecord.AbsentOn.Truncate(24 * time.Hour)
+
+			// Check if there are multiple lessons for this date
+			if len(absenceDateMap[absenceDate]) > 1 {
+				lessonResp.HasDuplicateDate = true
+			}
+
+			// Check if any lesson for this date has been delivered
+			if absenceDateDelivered[absenceDate] {
+				lessonResp.AlreadyDeliveredForDate = true
+			}
 		}
 
 		var extractedContent models.ExtractedContent

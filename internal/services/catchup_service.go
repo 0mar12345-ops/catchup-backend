@@ -28,7 +28,7 @@ var (
 	ErrInsufficientContent     = errors.New("insufficient content to generate catch-up lesson")
 )
 
-const MinWordCountThreshold = 10
+const MinWordCountThreshold = 300
 
 type CatchUpService struct {
 	coursesCollection          *mongo.Collection
