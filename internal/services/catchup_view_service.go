@@ -42,6 +42,7 @@ type StudentCatchUpLessonResponse struct {
 	CourseID    string    `json:"course_id"`
 	AbsenceDate time.Time `json:"absence_date"`
 	Status      string    `json:"status"`
+	Title       string    `json:"title"`
 	WordCount   int       `json:"word_count,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -68,6 +69,7 @@ type CatchUpLessonReviewResponse struct {
 	CourseID     string                `json:"course_id"`
 	CourseName   string                `json:"course_name"`
 	Status       string                `json:"status"`
+	Title        string                `json:"title"`
 	Explanation  string                `json:"explanation"`
 	Quiz         []models.QuizQuestion `json:"quiz"`
 	ContentAudit ContentAudit          `json:"content_audit"`
@@ -163,6 +165,7 @@ func (s *CatchUpViewService) GetCatchUpLessonForReview(
 		CourseID:     course.ID.Hex(),
 		CourseName:   course.Name,
 		Status:       string(lesson.Status),
+		Title:        lesson.Title,
 		Explanation:  lesson.Explanation,
 		Quiz:         lesson.Quiz,
 		ContentAudit: contentAudit,
@@ -222,6 +225,7 @@ func (s *CatchUpViewService) DeliverCatchUpLesson(
 	ctx context.Context,
 	lessonID, userID, schoolID string,
 	dueDate *time.Time,
+	title *string,
 ) error {
 
 	lessonOID, err := bson.ObjectIDFromHex(lessonID)
@@ -301,15 +305,23 @@ func (s *CatchUpViewService) DeliverCatchUpLesson(
 
 	// Update lesson with delivery information
 	now := time.Now().UTC()
+	updateFields := bson.M{
+		"status":                    models.CatchUpStatusDelivered,
+		"delivered_at":              now,
+		"updated_at":                now,
+		"classroom_assignment_id":   assignmentID,
+		"classroom_assignment_link": assignmentLink,
+	}
+
+	// Update title if provided
+	if title != nil && *title != "" {
+		updateFields["title"] = *title
+		lesson.Title = *title
+	}
+
 	_, err = s.catchUpLessonsCollection.UpdateOne(ctx,
 		bson.M{"_id": lessonOID},
-		bson.M{"$set": bson.M{
-			"status":                    models.CatchUpStatusDelivered,
-			"delivered_at":              now,
-			"updated_at":                now,
-			"classroom_assignment_id":   assignmentID,
-			"classroom_assignment_link": assignmentLink,
-		}},
+		bson.M{"$set": updateFields},
 	)
 
 	return err
@@ -386,6 +398,7 @@ func (s *CatchUpViewService) GetStudentCatchUpLessons(
 			StudentID: lesson.StudentID.Hex(),
 			CourseID:  lesson.CourseID.Hex(),
 			Status:    string(lesson.Status),
+			Title:     lesson.Title,
 			CreatedAt: lesson.CreatedAt,
 			UpdatedAt: lesson.UpdatedAt,
 		}
@@ -492,8 +505,12 @@ func (s *CatchUpViewService) createClassroomAssignment(
 	}
 
 	// Create the assignment payload with PDF attachment
+	assignmentTitle := lesson.Title
+	if assignmentTitle == "" {
+		assignmentTitle = fmt.Sprintf("Catch-Up: Content from %s", absenceDate.Format("Jan 2"))
+	}
 	assignmentPayload := map[string]interface{}{
-		"title":        fmt.Sprintf("Catch-Up: Content from %s", absenceDate.Format("Jan 2")),
+		"title":        assignmentTitle,
 		"description":  fmt.Sprintf("Please review the attached PDF for the catch-up lesson covering material from %s.", absenceDate.Format("Monday, January 2, 2006")),
 		"workType":     "ASSIGNMENT",
 		"state":        "PUBLISHED",
@@ -573,7 +590,11 @@ func (s *CatchUpViewService) generatePDF(lesson *models.CatchUpLesson, absenceDa
 
 	// Title
 	pdf.SetFont("Arial", "B", 18)
-	pdf.CellFormat(0, 10, fmt.Sprintf("Catch-Up Lesson for %s", absenceDate.Format("January 2, 2006")), "", 1, "C", false, 0, "")
+	title := lesson.Title
+	if title == "" {
+		title = fmt.Sprintf("Catch-Up Lesson for %s", absenceDate.Format("January 2, 2006"))
+	}
+	pdf.CellFormat(0, 10, title, "", 1, "C", false, 0, "")
 	pdf.Ln(5)
 
 	// Student name

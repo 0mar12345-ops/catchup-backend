@@ -39,7 +39,7 @@ func (h *CatchUpHandler) GenerateCatchUp(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
 	result, err := h.service.GenerateCatchUpForStudents(ctx, req, userID, schoolID)

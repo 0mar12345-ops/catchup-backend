@@ -107,6 +107,7 @@ func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 
 	var req struct {
 		DueDate *time.Time `json:"due_date"`
+		Title   *string    `json:"title"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -116,7 +117,7 @@ func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	err := h.service.DeliverCatchUpLesson(ctx, lessonID, userID, schoolID, req.DueDate)
+	err := h.service.DeliverCatchUpLesson(ctx, lessonID, userID, schoolID, req.DueDate, req.Title)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrCatchUpLessonNotFound):

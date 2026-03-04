@@ -30,7 +30,7 @@ var (
 	ErrInsufficientContent     = errors.New("insufficient content to generate catch-up lesson")
 )
 
-const MinWordCountThreshold = 300
+const MinWordCountThreshold = 10
 
 type CatchUpService struct {
 	coursesCollection          *mongo.Collection
@@ -310,12 +310,44 @@ func (s *CatchUpService) processStudentCatchUp(
 		return err
 	}
 
-	// Generate AI content
-	aiContent, err := s.generateAIContent(ctx, extractedContent, course)
-	if err != nil {
-		// Don't fail the entire process, just log warning
-		s.failIngestionJob(ctx, ingestionJob.ID, fmt.Sprintf("AI generation failed: %v", err.Error()))
-		return err
+	// Generate AI content with retry mechanism (up to 3 attempts)
+	var aiContent *AIGeneratedContent
+	var lastErr error
+	maxRetries := 3
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		fmt.Printf("AI generation attempt %d/%d for lesson %s\n", attempt, maxRetries, catchUpLesson.ID.Hex())
+
+		aiContent, lastErr = s.generateAIContent(ctx, extractedContent, course)
+		if lastErr == nil {
+			// Success - break out of retry loop
+			fmt.Printf("AI content generated successfully on attempt %d for lesson %s with title: %s\n", attempt, catchUpLesson.ID.Hex(), aiContent.Title)
+			break
+		}
+
+		// Log the error
+		fmt.Printf("AI generation attempt %d failed for lesson %s: %v\n", attempt, catchUpLesson.ID.Hex(), lastErr)
+
+		// If this wasn't the last attempt, wait before retrying
+		if attempt < maxRetries {
+			time.Sleep(time.Second * 2) // Wait 2 seconds before retry
+		}
+	}
+
+	// If all retries failed
+	if lastErr != nil {
+		fmt.Printf("AI generation failed after %d attempts for lesson %s: %v\n", maxRetries, catchUpLesson.ID.Hex(), lastErr)
+		s.failIngestionJob(ctx, ingestionJob.ID, fmt.Sprintf("AI generation failed after %d attempts: %v", maxRetries, lastErr.Error()))
+
+		// Also update the catch-up lesson to failed status
+		s.catchUpLessonsCollection.UpdateOne(ctx,
+			bson.M{"_id": catchUpLesson.ID},
+			bson.M{"$set": bson.M{
+				"status":     models.CatchUpStatusFailed,
+				"updated_at": time.Now().UTC(),
+			}},
+		)
+		return lastErr
 	}
 
 	// Update catch-up lesson with AI-generated content
@@ -323,12 +355,13 @@ func (s *CatchUpService) processStudentCatchUp(
 	_, err = s.catchUpLessonsCollection.UpdateOne(ctx,
 		bson.M{"_id": catchUpLesson.ID},
 		bson.M{"$set": bson.M{
+			"title":               aiContent.Title,
 			"explanation":         aiContent.Explanation,
 			"learning_objectives": aiContent.LearningObjectives,
 			"quiz":                aiContent.Quiz,
 			"status":              models.CatchUpStatusGenerated,
 			"generation_model":    "gpt-4o-mini",
-			"prompt_version":      "v1.0",
+			"prompt_version":      "v1.1",
 			"generated_at":        generatedTime,
 			"updated_at":          generatedTime,
 		}},
@@ -352,7 +385,8 @@ func (s *CatchUpService) processStudentCatchUp(
 }
 
 func (s *CatchUpService) failIngestionJob(ctx context.Context, jobID bson.ObjectID, reason string) {
-	s.ingestionJobsCollection.UpdateOne(ctx,
+	fmt.Printf("Failing ingestion job %s with reason: %s\n", jobID.Hex(), reason)
+	_, err := s.ingestionJobsCollection.UpdateOne(ctx,
 		bson.M{"_id": jobID},
 		bson.M{"$set": bson.M{
 			"status":         models.IngestionJobFailed,
@@ -360,6 +394,9 @@ func (s *CatchUpService) failIngestionJob(ctx context.Context, jobID bson.Object
 			"updated_at":     time.Now().UTC(),
 		}},
 	)
+	if err != nil {
+		fmt.Printf("Failed to update ingestion job status: %v\n", err)
+	}
 }
 
 func (s *CatchUpService) fetchClassroomContent(
@@ -698,19 +735,34 @@ func (s *CatchUpService) parseMaterials(materials []googleMaterial) []models.Con
 	for _, mat := range materials {
 		if mat.DriveFile != nil {
 			df := mat.DriveFile.DriveFile
-			kind, isSupported := classifyDriveFile(df.MimeType, df.Title)
+			mimeType := df.MimeType
+
+			// If MIME type is empty, it means we need to fetch it from Drive API
+			// For now, we'll mark it as needing metadata, but we'll try to extract it anyway
+			if mimeType == "" {
+				mimeType = "application/octet-stream"
+			}
+
+			kind, isSupported := classifyDriveFile(mimeType, df.Title)
 
 			att := models.ContentAttachment{
 				Title:       df.Title,
 				URL:         fmt.Sprintf("https://drive.google.com/file/d/%s/view", df.ID),
-				MimeType:    df.MimeType,
+				MimeType:    mimeType,
 				Kind:        kind,
 				IsSupported: isSupported,
 				ExternalID:  df.ID,
 			}
 
 			if !isSupported {
-				att.ExcludeCause = fmt.Sprintf("Unsupported file type: %s", df.MimeType)
+				if mimeType == "application/octet-stream" || mimeType == "" {
+					att.ExcludeCause = "MIME type not provided by Classroom API - will attempt extraction"
+					// Still mark as potentially supported for extraction attempt
+					att.IsSupported = true
+					att.Kind = models.AttachmentKindPDF // Assume PDF for extraction
+				} else {
+					att.ExcludeCause = fmt.Sprintf("Unsupported file type: %s", mimeType)
+				}
 			}
 
 			attachments = append(attachments, att)
@@ -756,9 +808,9 @@ func classifyDriveFile(mimeType, fileName string) (models.AttachmentKind, bool) 
 	fileName = strings.ToLower(fileName)
 
 	switch {
-	case strings.Contains(mimeType, "google-apps.document"):
+	case strings.Contains(mimeType, "google-apps.document") || mimeType == "application/vnd.google-apps.document":
 		return models.AttachmentKindGoogleDoc, true
-	case strings.Contains(mimeType, "google-apps.presentation"):
+	case strings.Contains(mimeType, "google-apps.presentation") || mimeType == "application/vnd.google-apps.presentation":
 		return models.AttachmentKindGoogleSlide, true
 	case strings.Contains(mimeType, "pdf") || mimeType == "application/pdf":
 		return models.AttachmentKindPDF, true
@@ -766,6 +818,21 @@ func classifyDriveFile(mimeType, fileName string) (models.AttachmentKind, bool) 
 		return models.AttachmentKindImage, false
 	case strings.Contains(mimeType, "video"):
 		return models.AttachmentKindVideo, false
+	}
+
+	// If MIME type is empty or unknown, try file extension
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		if strings.HasSuffix(fileName, ".pdf") {
+			return models.AttachmentKindPDF, true
+		}
+		if strings.HasSuffix(fileName, ".doc") || strings.HasSuffix(fileName, ".docx") {
+			return models.AttachmentKindPDF, false
+		}
+		if strings.HasSuffix(fileName, ".ppt") || strings.HasSuffix(fileName, ".pptx") {
+			return models.AttachmentKindPDF, false
+		}
+		// For Google Drive URLs without extension, mark as needing metadata fetch
+		return models.AttachmentKindOther, false
 	}
 
 	if strings.HasSuffix(fileName, ".pdf") {
@@ -854,7 +921,16 @@ func (s *CatchUpService) extractTextFromAttachment(
 		return "", err
 	}
 
-	switch att.Kind {
+	// If MIME type is unknown, fetch file metadata from Drive API
+	actualKind := att.Kind
+	if att.MimeType == "" || att.MimeType == "application/octet-stream" {
+		metadata, err := s.fetchDriveFileMetadata(ctx, client, att.ExternalID)
+		if err == nil && metadata.MimeType != "" {
+			actualKind, _ = classifyDriveFile(metadata.MimeType, metadata.Name)
+		}
+	}
+
+	switch actualKind {
 	case models.AttachmentKindGoogleDoc:
 		return s.extractFromGoogleDoc(ctx, client, att.ExternalID)
 	case models.AttachmentKindGoogleSlide:
@@ -862,8 +938,42 @@ func (s *CatchUpService) extractTextFromAttachment(
 	case models.AttachmentKindPDF:
 		return s.extractFromPDF(ctx, client, att.ExternalID)
 	default:
-		return "", fmt.Errorf("unsupported attachment kind: %s", att.Kind)
+		return "", fmt.Errorf("unsupported attachment kind: %s", actualKind)
 	}
+}
+
+func (s *CatchUpService) fetchDriveFileMetadata(ctx context.Context, client *http.Client, fileID string) (*struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+}, error) {
+	url := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?fields=name,mimeType", fileID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("drive API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var metadata struct {
+		Name     string `json:"name"`
+		MimeType string `json:"mimeType"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return nil, err
+	}
+
+	return &metadata, nil
 }
 
 func (s *CatchUpService) extractFromGoogleDoc(ctx context.Context, client *http.Client, fileID string) (string, error) {
@@ -1132,6 +1242,7 @@ func (s *CatchUpService) extractAndCombineText(
 }
 
 type AIGeneratedContent struct {
+	Title              string
 	Explanation        string
 	LearningObjectives []string
 	Quiz               []models.QuizQuestion
@@ -1141,6 +1252,8 @@ func (s *CatchUpService) generateAIContent(ctx context.Context, extractedContent
 	if s.config.OpenAIAPIKey == "" {
 		return nil, errors.New("OpenAI API key not configured")
 	}
+
+	fmt.Printf("Starting AI content generation for course: %s, word count: %d\n", course.Name, extractedContent.WordCount)
 
 	client := openai.NewClient(s.config.OpenAIAPIKey)
 
@@ -1152,7 +1265,12 @@ Content the student missed (extracted from class materials):
 %s
 
 Your task:
-1. Create a clear, structured explanation of what the student missed
+1. Create a concise, engaging title for this catch-up lesson (max 60 characters)
+   - Should clearly indicate the topic covered
+   - Make it student-friendly and descriptive
+   - Example: "Photosynthesis & Cell Respiration Overview"
+
+2. Create a clear, structured explanation of what the student missed
    - Format the explanation as clean, semantic HTML
    - Use <h2> for main section headings
    - Use <h3> for subsection headings
@@ -1164,15 +1282,16 @@ Your task:
    - Make it engaging and easy to understand
    - Do NOT include any <script>, <style>, or potentially unsafe HTML tags
 
-2. Generate 5-7 learning objectives that the student should achieve after reviewing this content
+3. Generate 5-7 learning objectives that the student should achieve after reviewing this content
 
-3. Create a quiz with 5-7 questions to check understanding
+4. Create a quiz with 5-7 questions to check understanding
    - Mix of multiple choice (4 options each) and short answer questions
    - Questions should test comprehension of the key concepts
    - Include the correct answer for each question
 
 Please respond in the following JSON format:
 {
+  "title": "Concise lesson title",
   "explanation": "<h2>Section Title</h2><p>Well-structured HTML explanation...</p><ul><li>Point 1</li></ul>",
   "learning_objectives": ["Objective 1", "Objective 2", ...],
   "quiz": [
@@ -1197,7 +1316,7 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: "You are an expert educational content creator specializing in creating engaging catch-up lessons for students. Always respond with valid JSON.",
+				Content: "You are an expert educational content creator specializing in creating engaging catch-up lessons for students. Always wrap your JSON response in a code block starting with ```json and ending with ```.",
 			},
 			{
 				Role:    openai.ChatMessageRoleUser,
@@ -1217,8 +1336,16 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 	}
 
 	content := resp.Choices[0].Message.Content
+	fmt.Printf("Received OpenAI response, length: %d bytes\n", len(content))
+
+	// Strip the ```json ... ``` code block wrapper
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
 
 	var aiResponse struct {
+		Title              string   `json:"title"`
 		Explanation        string   `json:"explanation"`
 		LearningObjectives []string `json:"learning_objectives"`
 		Quiz               []struct {
@@ -1231,8 +1358,12 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 
 	err = json.Unmarshal([]byte(content), &aiResponse)
 	if err != nil {
+		fmt.Printf("Failed to parse AI response as JSON: %v\n", err)
+		fmt.Printf("Raw content (first 500 chars): %s\n", content[:min(500, len(content))])
 		return nil, fmt.Errorf("failed to parse AI response: %w", err)
 	}
+
+	fmt.Printf("Successfully parsed AI response. Title: %s, Quiz questions: %d\n", aiResponse.Title, len(aiResponse.Quiz))
 
 	quiz := make([]models.QuizQuestion, len(aiResponse.Quiz))
 	for i, q := range aiResponse.Quiz {
@@ -1250,6 +1381,7 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 	}
 
 	return &AIGeneratedContent{
+		Title:              aiResponse.Title,
 		Explanation:        aiResponse.Explanation,
 		LearningObjectives: aiResponse.LearningObjectives,
 		Quiz:               quiz,

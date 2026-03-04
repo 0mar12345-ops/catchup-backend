@@ -136,6 +136,7 @@ type CatchUpLesson struct {
 	AbsenceRecordID         bson.ObjectID  `bson:"absence_record_id" json:"absence_record_id"`
 	ExtractedContentID      bson.ObjectID  `bson:"extracted_content_id" json:"extracted_content_id"`
 	Status                  CatchUpStatus  `bson:"status" json:"status"`
+	Title                   string         `bson:"title" json:"title"`
 	Explanation             string         `bson:"explanation" json:"explanation"`
 	LearningObjectives      []string       `bson:"learning_objectives,omitempty" json:"learning_objectives,omitempty"`
 	Quiz                    []QuizQuestion `bson:"quiz" json:"quiz"`
