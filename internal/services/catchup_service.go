@@ -6,16 +6,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/0mar12345-ops/config"
 	"github.com/0mar12345-ops/internal/models"
+	"github.com/gen2brain/go-fitz"
 	"github.com/ledongthuc/pdf"
+	"github.com/otiai10/gosseract/v2"
 	openai "github.com/sashabaranov/go-openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -216,6 +221,11 @@ func (s *CatchUpService) processStudentCatchUp(
 	oauthCred *models.OAuthCredential,
 	course *models.Course,
 ) error {
+	// Create a context with extended timeout for large PDF processing (up to 50 MB)
+	// Allows time for: PDF download (2 min) + extraction (3 min) + AI generation (3 min) + buffer (2 min)
+	processCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
 	now := time.Now().UTC()
 
 	absenceRecord := models.AbsenceRecord{
@@ -231,7 +241,7 @@ func (s *CatchUpService) processStudentCatchUp(
 		UpdatedAt:         now,
 	}
 
-	_, err := s.absenceRecordsCollection.InsertOne(ctx, absenceRecord)
+	_, err := s.absenceRecordsCollection.InsertOne(processCtx, absenceRecord)
 	if err != nil {
 		return fmt.Errorf("failed to create absence record: %w", err)
 	}
@@ -247,13 +257,13 @@ func (s *CatchUpService) processStudentCatchUp(
 		UpdatedAt:         now,
 	}
 
-	_, err = s.ingestionJobsCollection.InsertOne(ctx, ingestionJob)
+	_, err = s.ingestionJobsCollection.InsertOne(processCtx, ingestionJob)
 	if err != nil {
 		return fmt.Errorf("failed to create ingestion job: %w", err)
 	}
 
 	startTime := now
-	_, err = s.ingestionJobsCollection.UpdateOne(ctx,
+	_, err = s.ingestionJobsCollection.UpdateOne(processCtx,
 		bson.M{"_id": ingestionJob.ID},
 		bson.M{"$set": bson.M{
 			"status":     models.IngestionJobRunning,
@@ -265,27 +275,27 @@ func (s *CatchUpService) processStudentCatchUp(
 		return err
 	}
 
-	contentItems, err := s.fetchClassroomContent(ctx, oauthCred, course, absenceDate, schoolID, courseID, ingestionJob.ID)
+	contentItems, err := s.fetchClassroomContent(processCtx, oauthCred, course, absenceDate, schoolID, courseID, ingestionJob.ID)
 	if err != nil {
-		s.failIngestionJob(ctx, ingestionJob.ID, err.Error())
+		s.failIngestionJob(processCtx, ingestionJob.ID, err.Error())
 		return err
 	}
 
 	fmt.Print(contentItems)
 
 	if len(contentItems) == 0 {
-		s.failIngestionJob(ctx, ingestionJob.ID, "no content found for this date")
+		s.failIngestionJob(processCtx, ingestionJob.ID, "no content found for this date")
 		return ErrNoContentFound
 	}
 
-	extractedContent, err := s.extractAndCombineText(ctx, schoolID, courseID, absenceRecord.ID, ingestionJob.ID, contentItems, oauthCred)
+	extractedContent, err := s.extractAndCombineText(processCtx, schoolID, courseID, absenceRecord.ID, ingestionJob.ID, contentItems, oauthCred)
 	if err != nil {
-		s.failIngestionJob(ctx, ingestionJob.ID, err.Error())
+		s.failIngestionJob(processCtx, ingestionJob.ID, err.Error())
 		return err
 	}
 
 	if !extractedContent.MeetsThreshold {
-		s.failIngestionJob(ctx, ingestionJob.ID, "insufficient content - word count below threshold")
+		s.failIngestionJob(processCtx, ingestionJob.ID, "insufficient content - word count below threshold")
 		return ErrInsufficientContent
 	}
 
@@ -304,9 +314,9 @@ func (s *CatchUpService) processStudentCatchUp(
 		UpdatedAt:          now,
 	}
 
-	_, err = s.catchUpLessonsCollection.InsertOne(ctx, catchUpLesson)
+	_, err = s.catchUpLessonsCollection.InsertOne(processCtx, catchUpLesson)
 	if err != nil {
-		s.failIngestionJob(ctx, ingestionJob.ID, err.Error())
+		s.failIngestionJob(processCtx, ingestionJob.ID, err.Error())
 		return err
 	}
 
@@ -318,7 +328,7 @@ func (s *CatchUpService) processStudentCatchUp(
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		fmt.Printf("AI generation attempt %d/%d for lesson %s\n", attempt, maxRetries, catchUpLesson.ID.Hex())
 
-		aiContent, lastErr = s.generateAIContent(ctx, extractedContent, course)
+		aiContent, lastErr = s.generateAIContent(processCtx, extractedContent, course)
 		if lastErr == nil {
 			// Success - break out of retry loop
 			fmt.Printf("AI content generated successfully on attempt %d for lesson %s with title: %s\n", attempt, catchUpLesson.ID.Hex(), aiContent.Title)
@@ -337,10 +347,10 @@ func (s *CatchUpService) processStudentCatchUp(
 	// If all retries failed
 	if lastErr != nil {
 		fmt.Printf("AI generation failed after %d attempts for lesson %s: %v\n", maxRetries, catchUpLesson.ID.Hex(), lastErr)
-		s.failIngestionJob(ctx, ingestionJob.ID, fmt.Sprintf("AI generation failed after %d attempts: %v", maxRetries, lastErr.Error()))
+		s.failIngestionJob(processCtx, ingestionJob.ID, fmt.Sprintf("AI generation failed after %d attempts: %v", maxRetries, lastErr.Error()))
 
 		// Also update the catch-up lesson to failed status
-		s.catchUpLessonsCollection.UpdateOne(ctx,
+		s.catchUpLessonsCollection.UpdateOne(processCtx,
 			bson.M{"_id": catchUpLesson.ID},
 			bson.M{"$set": bson.M{
 				"status":     models.CatchUpStatusFailed,
@@ -352,7 +362,7 @@ func (s *CatchUpService) processStudentCatchUp(
 
 	// Update catch-up lesson with AI-generated content
 	generatedTime := time.Now().UTC()
-	_, err = s.catchUpLessonsCollection.UpdateOne(ctx,
+	_, err = s.catchUpLessonsCollection.UpdateOne(processCtx,
 		bson.M{"_id": catchUpLesson.ID},
 		bson.M{"$set": bson.M{
 			"title":               aiContent.Title,
@@ -367,12 +377,12 @@ func (s *CatchUpService) processStudentCatchUp(
 		}},
 	)
 	if err != nil {
-		s.failIngestionJob(ctx, ingestionJob.ID, err.Error())
+		s.failIngestionJob(processCtx, ingestionJob.ID, err.Error())
 		return err
 	}
 
 	completedTime := time.Now().UTC()
-	_, err = s.ingestionJobsCollection.UpdateOne(ctx,
+	_, err = s.ingestionJobsCollection.UpdateOne(processCtx,
 		bson.M{"_id": ingestionJob.ID},
 		bson.M{"$set": bson.M{
 			"status":       models.IngestionJobCompleted,
@@ -386,7 +396,13 @@ func (s *CatchUpService) processStudentCatchUp(
 
 func (s *CatchUpService) failIngestionJob(ctx context.Context, jobID bson.ObjectID, reason string) {
 	fmt.Printf("Failing ingestion job %s with reason: %s\n", jobID.Hex(), reason)
-	_, err := s.ingestionJobsCollection.UpdateOne(ctx,
+
+	// Create a fresh context with timeout to ensure this critical update succeeds
+	// even if the parent context has expired (e.g., during large PDF processing)
+	updateCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := s.ingestionJobsCollection.UpdateOne(updateCtx,
 		bson.M{"_id": jobID},
 		bson.M{"$set": bson.M{
 			"status":         models.IngestionJobFailed,
@@ -1049,32 +1065,72 @@ func (s *CatchUpService) extractFromPDF(ctx context.Context, client *http.Client
 		return "", fmt.Errorf("drive API error downloading PDF: %d - %s", resp.StatusCode, string(body))
 	}
 
+	// Check PDF size before downloading (max 50 MB)
+	contentLength := resp.ContentLength
+	if contentLength > 50*1024*1024 {
+		return "", fmt.Errorf("PDF file too large: %d bytes (max 50 MB)", contentLength)
+	}
+
 	pdfData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read PDF data: %w", err)
 	}
+
+	fmt.Printf("Downloaded PDF, size: %d bytes (%.2f MB)\n", len(pdfData), float64(len(pdfData))/(1024*1024))
 
 	text, err := s.extractTextFromPDFBytes(pdfData)
 	if err == nil && len(strings.Fields(text)) >= 50 {
 		return text, nil
 	}
 
-	if s.config.OpenAIAPIKey != "" {
+	// Check if we got good results from standard extraction
+	pdfSizeMB := float64(len(pdfData)) / (1024 * 1024)
+	wordCount := len(strings.Fields(text))
+
+	fmt.Printf("Standard PDF extraction: %.2f MB, %d words extracted\n", pdfSizeMB, wordCount)
+
+	// If standard extraction got good results (>=50 words), return immediately
+	if wordCount >= 50 {
+		fmt.Printf("Standard extraction successful with %d words\n", wordCount)
+		return text, nil
+	}
+
+	// Standard extraction yielded insufficient text - try OCR fallback
+	fmt.Printf("Standard extraction insufficient (%d words), attempting OCR...\n", wordCount)
+
+	// Try Tesseract OCR for scanned/image-based PDFs
+	if s.isTesseractAvailable() {
+		fmt.Println("Using Tesseract OCR for text extraction...")
+		ocrText, ocrErr := s.extractWithTesseractOCR(ctx, pdfData)
+		if ocrErr == nil && len(strings.Fields(ocrText)) > wordCount {
+			fmt.Printf("Tesseract OCR successful: %d words extracted\n", len(strings.Fields(ocrText)))
+			return ocrText, nil
+		}
+		if ocrErr != nil {
+			fmt.Printf("Tesseract OCR failed: %v\n", ocrErr)
+		}
+	}
+
+	// For smaller PDFs (<= 10 MB), try OpenAI Vision as last resort
+	if pdfSizeMB <= 10 && s.config.OpenAIAPIKey != "" {
+		fmt.Printf("Trying OpenAI Vision API as fallback (PDF size: %.2f MB)...\n", pdfSizeMB)
 		aiText, aiErr := s.extractWithOpenAIVision(ctx, pdfData, fileID)
 		if aiErr == nil && aiText != "" {
+			fmt.Printf("OpenAI Vision successful: %d words extracted\n", len(strings.Fields(aiText)))
 			return aiText, nil
 		}
-
 		if aiErr != nil {
 			fmt.Printf("OpenAI Vision fallback failed: %v\n", aiErr)
 		}
 	}
 
+	// Return whatever text we have, even if insufficient
 	if text != "" {
+		fmt.Printf("Returning partial extraction: %d words\n", wordCount)
 		return text, nil
 	}
 
-	return "", fmt.Errorf("PDF text extraction failed: library extraction yielded no text and OpenAI fallback unavailable or failed")
+	return "", fmt.Errorf("PDF text extraction failed: PDF appears to be scanned/image-based. Standard extraction: %d words, OCR: failed, OpenAI: unavailable/failed", wordCount)
 }
 
 func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte) (string, error) {
@@ -1100,7 +1156,14 @@ func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte) (string, error)
 	var textParts []string
 	totalPages := pdfReader.NumPage()
 
-	for pageNum := 1; pageNum <= totalPages; pageNum++ {
+	// Limit to first 200 pages for large PDFs to prevent excessive processing
+	maxPages := totalPages
+	if maxPages > 200 {
+		fmt.Printf("PDF has %d pages, limiting extraction to first 200 pages\n", totalPages)
+		maxPages = 200
+	}
+
+	for pageNum := 1; pageNum <= maxPages; pageNum++ {
 		page := pdfReader.Page(pageNum)
 		if page.V.IsNull() {
 			continue
@@ -1108,6 +1171,8 @@ func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte) (string, error)
 
 		pageText, err := page.GetPlainText(nil)
 		if err != nil {
+			// Log but continue - don't fail on individual page errors
+			fmt.Printf("Warning: Failed to extract text from page %d: %v\n", pageNum, err)
 			continue
 		}
 
@@ -1116,7 +1181,147 @@ func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte) (string, error)
 		}
 	}
 
-	return strings.Join(textParts, "\n\n"), nil
+	combinedText := strings.Join(textParts, "\n\n")
+	wordCount := len(strings.Fields(combinedText))
+
+	fmt.Printf("PDF text extraction complete: %d pages processed, %d words extracted\n", len(textParts), wordCount)
+
+	return combinedText, nil
+}
+
+// isTesseractAvailable checks if Tesseract OCR is installed on the system
+func (s *CatchUpService) isTesseractAvailable() bool {
+	cmd := exec.Command("tesseract", "--version")
+	err := cmd.Run()
+	return err == nil
+}
+
+// extractWithTesseractOCR extracts text from a PDF using Tesseract OCR
+// This is useful for scanned/image-based PDFs where standard text extraction fails
+func (s *CatchUpService) extractWithTesseractOCR(ctx context.Context, pdfData []byte) (string, error) {
+	// Convert PDF to images
+	images, err := s.convertPDFToImages(pdfData)
+	if err != nil {
+		return "", fmt.Errorf("failed to convert PDF to images: %w", err)
+	}
+
+	if len(images) == 0 {
+		return "", errors.New("no images extracted from PDF")
+	}
+
+	fmt.Printf("Converted PDF to %d images for OCR processing\n", len(images))
+
+	// Initialize Tesseract client
+	client := gosseract.NewClient()
+	defer client.Close()
+
+	// Set language to English (you can make this configurable)
+	client.SetLanguage("eng")
+
+	var textParts []string
+
+	// OCR each image (limit to first 50 pages to prevent excessive processing)
+	maxPages := len(images)
+	if maxPages > 50 {
+		fmt.Printf("Limiting OCR to first 50 pages (PDF has %d pages)\n", len(images))
+		maxPages = 50
+	}
+
+	for i := 0; i < maxPages; i++ {
+		// Save image to temporary file
+		tmpImg, err := os.CreateTemp("", fmt.Sprintf("ocr-page-%d-*.png", i))
+		if err != nil {
+			fmt.Printf("Failed to create temp file for page %d: %v\n", i, err)
+			continue
+		}
+
+		// Write PNG image
+		err = png.Encode(tmpImg, images[i])
+		tmpImg.Close()
+
+		if err != nil {
+			fmt.Printf("Failed to write image for page %d: %v\n", i, err)
+			os.Remove(tmpImg.Name())
+			continue
+		}
+
+		// Perform OCR
+		client.SetImage(tmpImg.Name())
+		pageText, err := client.Text()
+
+		// Clean up temp file
+		os.Remove(tmpImg.Name())
+
+		if err != nil {
+			fmt.Printf("OCR failed for page %d: %v\n", i+1, err)
+			continue
+		}
+
+		if strings.TrimSpace(pageText) != "" {
+			textParts = append(textParts, pageText)
+			fmt.Printf("OCR page %d: %d words extracted\n", i+1, len(strings.Fields(pageText)))
+		}
+	}
+
+	if len(textParts) == 0 {
+		return "", errors.New("OCR yielded no text from any page")
+	}
+
+	combinedText := strings.Join(textParts, "\n\n")
+	fmt.Printf("Total OCR extraction: %d pages, %d words\n", len(textParts), len(strings.Fields(combinedText)))
+
+	return combinedText, nil
+}
+
+// convertPDFToImages converts a PDF to a slice of images (one per page)
+func (s *CatchUpService) convertPDFToImages(pdfData []byte) ([]image.Image, error) {
+	// Save PDF to temporary file
+	tmpPDF, err := os.CreateTemp("", "pdf-to-img-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp PDF file: %w", err)
+	}
+	defer os.Remove(tmpPDF.Name())
+
+	if _, err := tmpPDF.Write(pdfData); err != nil {
+		tmpPDF.Close()
+		return nil, fmt.Errorf("failed to write PDF data: %w", err)
+	}
+	tmpPDF.Close()
+
+	// Open PDF with go-fitz (MuPDF bindings)
+	doc, err := fitz.New(tmpPDF.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open PDF with fitz: %w", err)
+	}
+	defer doc.Close()
+
+	numPages := doc.NumPage()
+	if numPages == 0 {
+		return nil, errors.New("PDF has no pages")
+	}
+
+	fmt.Printf("PDF has %d pages, converting to images...\n", numPages)
+
+	var images []image.Image
+
+	// Limit to first 50 pages for large PDFs
+	maxPages := numPages
+	if maxPages > 50 {
+		maxPages = 50
+	}
+
+	for i := 0; i < maxPages; i++ {
+		// Render page to image at 150 DPI (good balance of quality vs size)
+		img, err := doc.Image(i)
+		if err != nil {
+			fmt.Printf("Failed to render page %d: %v\n", i+1, err)
+			continue
+		}
+
+		images = append(images, img)
+	}
+
+	return images, nil
 }
 
 func (s *CatchUpService) extractWithOpenAIVision(ctx context.Context, fileData []byte, fileID string) (string, error) {
