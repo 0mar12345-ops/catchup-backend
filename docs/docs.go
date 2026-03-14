@@ -2,21 +2,43 @@ package docs
 
 import (
 	"encoding/json"
+	"os"
 
 	"github.com/swaggo/swag"
 )
 
 var SwaggerInfo = &swag.Spec{
 	Version:          "1.0",
-	Host:             "localhost:8080",
-	BasePath:         "/",
-	Schemes:          []string{"http", "https"},
+	Host:             getSwaggerHost(),
+	BasePath:         getSwaggerBasePath(),
+	Schemes:          getSwaggerSchemes(),
 	Title:            "GClass AI API",
 	Description:      "Pilot MVP API documentation",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  "{}",
 	LeftDelim:        "{{",
 	RightDelim:       "}}",
+}
+
+func getSwaggerHost() string {
+	if host := os.Getenv("SWAGGER_HOST"); host != "" {
+		return host
+	}
+	return "localhost:8080"
+}
+
+func getSwaggerBasePath() string {
+	if basePath := os.Getenv("SWAGGER_BASE_PATH"); basePath != "" {
+		return basePath
+	}
+	return "/"
+}
+
+func getSwaggerSchemes() []string {
+	if os.Getenv("GIN_MODE") == "release" {
+		return []string{"https"}
+	}
+	return []string{"http", "https"}
 }
 
 func init() {
@@ -58,8 +80,8 @@ func baseSwaggerDoc() map[string]any {
 			"description": "Pilot MVP API documentation",
 			"version":     "1.0",
 		},
-		"basePath":    "/",
-		"schemes":     []string{"http", "https"},
+		"basePath":    getSwaggerBasePath(),
+		"schemes":     getSwaggerSchemes(),
 		"paths":       map[string]any{},
 		"definitions": map[string]any{},
 	}
