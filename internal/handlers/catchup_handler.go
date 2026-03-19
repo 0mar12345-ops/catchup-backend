@@ -53,6 +53,12 @@ func (h *CatchUpHandler) GenerateCatchUp(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "no content found for the specified date"})
 		case errors.Is(err, services.ErrInsufficientContent):
 			c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient content to generate catch-up lesson"})
+		case errors.Is(err, services.ErrOAuthTokenInvalid):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":        "oauth_invalid",
+				"message":      "Your Google Classroom authorization has expired. Please re-authorize your account.",
+				"needs_reauth": true,
+			})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate catch-up"})
 		}

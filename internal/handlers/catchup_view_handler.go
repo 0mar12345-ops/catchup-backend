@@ -159,6 +159,12 @@ func (h *CatchUpViewHandler) DeliverCatchUpLesson(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "catch-up lesson not found"})
 		case errors.Is(err, services.ErrUnauthorizedAccess):
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		case errors.Is(err, services.ErrOAuthTokenInvalid):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":        "oauth_invalid",
+				"message":      "Your Google Classroom authorization has expired. Please re-authorize your account.",
+				"needs_reauth": true,
+			})
 		default:
 			// Log the detailed error for debugging
 			c.Error(err)
@@ -211,6 +217,12 @@ func (h *CatchUpViewHandler) RegenerateCatchUpLesson(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "catch-up lesson not found"})
 		case errors.Is(err, services.ErrUnauthorizedAccess):
 			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		case errors.Is(err, services.ErrOAuthTokenInvalid):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":        "oauth_invalid",
+				"message":      "Your Google Classroom authorization has expired. Please re-authorize your account.",
+				"needs_reauth": true,
+			})
 		default:
 			c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to regenerate lesson", "details": err.Error()})

@@ -104,6 +104,17 @@ func (s *UserOAuthService) FrontendURL() string {
 // Returns updated OAuthCredential and http.Client, or error
 func (s *UserOAuthService) RefreshOAuthToken(ctx context.Context, oauthCred *models.OAuthCredential) (*http.Client, error) {
 	if oauthCred.RefreshTokenEnc == "" {
+		// Mark as invalid if no refresh token
+		_, updateErr := s.oauthCollection.UpdateOne(ctx,
+			bson.M{"_id": oauthCred.ID},
+			bson.M{"$set": bson.M{
+				"status":     "invalid",
+				"updated_at": time.Now().UTC(),
+			}},
+		)
+		if updateErr != nil {
+			fmt.Printf("Failed to mark OAuth credential as invalid: %v\n", updateErr)
+		}
 		return nil, errors.New("refresh token not found - user needs to re-authorize")
 	}
 
@@ -125,7 +136,12 @@ func (s *UserOAuthService) RefreshOAuthToken(ctx context.Context, oauthCred *mod
 	if err != nil {
 		// Refresh failed - mark as invalid in database
 		fmt.Printf("Failed to refresh OAuth token for user %s: %v\n", oauthCred.UserID.Hex(), err)
-		_, updateErr := s.oauthCollection.UpdateOne(ctx,
+
+		// Use a separate context with timeout to ensure the update completes
+		updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, updateErr := s.oauthCollection.UpdateOne(updateCtx,
 			bson.M{"_id": oauthCred.ID},
 			bson.M{"$set": bson.M{
 				"status":     "invalid",

@@ -598,11 +598,19 @@ func (s *CatchUpViewService) GetStudentCatchUpLessons(
 
 func (s *CatchUpViewService) createOAuthClient(ctx context.Context, oauthCred *models.OAuthCredential) (*http.Client, error) {
 	if oauthCred.RefreshTokenEnc == "" {
-		return nil, errors.New("refresh token not found - user needs to re-authorize")
+		return nil, ErrOAuthTokenInvalid
 	}
 
 	// Use centralized refresh method from UserOAuthService
-	return s.userOAuthService.RefreshOAuthToken(ctx, oauthCred)
+	// This method automatically refreshes the token if needed and marks as invalid if refresh fails
+	client, err := s.userOAuthService.RefreshOAuthToken(ctx, oauthCred)
+	if err != nil {
+		// RefreshOAuthToken already marked the credential as invalid in the database
+		// Wrap the error so it can be identified as an OAuth error
+		return nil, fmt.Errorf("%w: %v", ErrOAuthTokenInvalid, err)
+	}
+
+	return client, nil
 }
 
 func (s *CatchUpViewService) createClassroomAssignment(

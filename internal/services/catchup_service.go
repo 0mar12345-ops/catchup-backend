@@ -31,6 +31,7 @@ var (
 	ErrInvalidCatchUpStudentID = errors.New("invalid student id")
 	ErrNoContentFound          = errors.New("no content found for the specified date")
 	ErrInsufficientContent     = errors.New("insufficient content to generate catch-up lesson")
+	ErrOAuthTokenInvalid       = errors.New("oauth token is invalid - user needs to re-authorize")
 )
 
 const MinWordCountThreshold = 300
@@ -197,6 +198,10 @@ func (s *CatchUpService) GenerateCatchUpForStudents(
 
 		err = s.processStudentCatchUp(ctx, schoolOID, courseOID, studentOID, userOID, absenceDate, &oauthCred, &course)
 		if err != nil {
+			// If this is an OAuth error, immediately return it (don't continue processing)
+			if errors.Is(err, ErrOAuthTokenInvalid) {
+				return nil, ErrOAuthTokenInvalid
+			}
 			result.FailedCount++
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Failed for student %s: %v", studentIDStr, err))
 			continue
@@ -914,13 +919,20 @@ func isCatchUpAssignment(cw googleCourseWork) bool {
 }
 
 func (s *CatchUpService) createOAuthClient(ctx context.Context, oauthCred *models.OAuthCredential) (*http.Client, error) {
-
 	if oauthCred.RefreshTokenEnc == "" {
-		return nil, errors.New("refresh token not found - user needs to re-authorize")
+		return nil, ErrOAuthTokenInvalid
 	}
 
 	// Use centralized refresh method from UserOAuthService
-	return s.userOAuthService.RefreshOAuthToken(ctx, oauthCred)
+	// This method automatically refreshes the token if needed and marks as invalid if refresh fails
+	client, err := s.userOAuthService.RefreshOAuthToken(ctx, oauthCred)
+	if err != nil {
+		// RefreshOAuthToken already marked the credential as invalid in the database
+		// Wrap the error so it can be identified as an OAuth error
+		return nil, fmt.Errorf("%w: %v", ErrOAuthTokenInvalid, err)
+	}
+
+	return client, nil
 }
 
 func (s *CatchUpService) extractTextFromAttachment(
