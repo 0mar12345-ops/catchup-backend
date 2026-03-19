@@ -44,6 +44,7 @@ type CatchUpService struct {
 	contentItemsCollection     *mongo.Collection
 	extractedContentCollection *mongo.Collection
 	catchUpLessonsCollection   *mongo.Collection
+	batchJobsCollection        *mongo.Collection
 	oauthCollection            *mongo.Collection
 	userOAuthService           *UserOAuthService
 	config                     *config.Config
@@ -106,6 +107,7 @@ func NewCatchUpService(client *mongo.Client, dbName string, cfg *config.Config, 
 		contentItemsCollection:     db.Collection("content_items"),
 		extractedContentCollection: db.Collection("extracted_content"),
 		catchUpLessonsCollection:   db.Collection("catchup_lessons"),
+		batchJobsCollection:        db.Collection("batch_catchup_jobs"),
 		oauthCollection:            db.Collection("oauth_credentials"),
 		userOAuthService:           userOAuthService,
 		config:                     cfg,
@@ -123,6 +125,256 @@ type GenerateCatchUpResult struct {
 	FailedCount  int      `json:"failed_count"`
 	Warnings     []string `json:"warnings,omitempty"`
 	Message      string   `json:"message"`
+	BatchJobID   string   `json:"batch_job_id,omitempty"` // For async processing
+}
+
+// GenerateCatchUpForStudentsAsync initiates async background processing
+func (s *CatchUpService) GenerateCatchUpForStudentsAsync(
+	ctx context.Context,
+	req GenerateCatchUpRequest,
+	userID, schoolID string,
+) (*GenerateCatchUpResult, error) {
+	courseOID, err := bson.ObjectIDFromHex(req.CourseID)
+	if err != nil {
+		return nil, ErrInvalidCatchUpCourseID
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, errors.New("invalid school id")
+	}
+
+	absenceDate, err := time.Parse("2006-01-02", req.AbsenceDate)
+	if err != nil {
+		return nil, errors.New("invalid date format, use YYYY-MM-DD")
+	}
+
+	// Verify course access
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":        courseOID,
+		"school_id":  schoolOID,
+		"teacher_id": userOID,
+	}).Decode(&course)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrCourseNotFound
+		}
+		return nil, err
+	}
+
+	// Verify OAuth credentials exist
+	var oauthCred models.OAuthCredential
+	err = s.oauthCollection.FindOne(ctx, bson.M{
+		"school_id": schoolOID,
+		"user_id":   userOID,
+	}).Decode(&oauthCred)
+	if err != nil {
+		return nil, errors.New("oauth credentials not found")
+	}
+
+	// Validate student IDs and convert to ObjectIDs
+	studentOIDs := make([]bson.ObjectID, 0, len(req.StudentIDs))
+	for _, studentIDStr := range req.StudentIDs {
+		studentOID, err := bson.ObjectIDFromHex(studentIDStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid student ID: %s", studentIDStr)
+		}
+
+		// Verify student exists
+		count, err := s.studentsCollection.CountDocuments(ctx, bson.M{
+			"_id":       studentOID,
+			"school_id": schoolOID,
+		})
+		if err != nil || count == 0 {
+			return nil, fmt.Errorf("student not found: %s", studentIDStr)
+		}
+		studentOIDs = append(studentOIDs, studentOID)
+	}
+
+	// Create batch job
+	now := time.Now().UTC()
+	batchJob := models.BatchCatchUpJob{
+		ID:                bson.NewObjectID(),
+		SchoolID:          schoolOID,
+		CourseID:          courseOID,
+		TeacherID:         userOID,
+		StudentIDs:        studentOIDs,
+		AbsenceDate:       absenceDate,
+		Status:            models.BatchJobPending,
+		TotalStudents:     len(studentOIDs),
+		ProcessedStudents: 0,
+		SuccessCount:      0,
+		FailedCount:       0,
+		Warnings:          []string{},
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+
+	_, err = s.batchJobsCollection.InsertOne(ctx, batchJob)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch job: %w", err)
+	}
+
+	// Start background processing
+	go s.processBatchJob(batchJob.ID, schoolOID, courseOID, userOID, studentOIDs, absenceDate)
+
+	return &GenerateCatchUpResult{
+		Message:    fmt.Sprintf("Processing started for %d student(s)", len(studentOIDs)),
+		BatchJobID: batchJob.ID.Hex(),
+	}, nil
+}
+
+// GetBatchJobStatus retrieves the current status of a batch job
+func (s *CatchUpService) GetBatchJobStatus(ctx context.Context, batchJobID, userID, schoolID string) (*models.BatchCatchUpJob, error) {
+	jobOID, err := bson.ObjectIDFromHex(batchJobID)
+	if err != nil {
+		return nil, errors.New("invalid batch job id")
+	}
+
+	userOID, err := bson.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+
+	schoolOID, err := bson.ObjectIDFromHex(schoolID)
+	if err != nil {
+		return nil, errors.New("invalid school id")
+	}
+
+	var batchJob models.BatchCatchUpJob
+	err = s.batchJobsCollection.FindOne(ctx, bson.M{
+		"_id":        jobOID,
+		"school_id":  schoolOID,
+		"teacher_id": userOID,
+	}).Decode(&batchJob)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("batch job not found")
+		}
+		return nil, err
+	}
+
+	return &batchJob, nil
+}
+
+// processBatchJob runs in background to process all students
+func (s *CatchUpService) processBatchJob(
+	batchJobID, schoolID, courseID, teacherID bson.ObjectID,
+	studentIDs []bson.ObjectID,
+	absenceDate time.Time,
+) {
+	// Create a new context with long timeout for batch processing
+	ctx := context.Background()
+
+	// Update status to processing
+	now := time.Now().UTC()
+	_, err := s.batchJobsCollection.UpdateOne(ctx,
+		bson.M{"_id": batchJobID},
+		bson.M{"$set": bson.M{
+			"status":     models.BatchJobProcessing,
+			"started_at": now,
+			"updated_at": now,
+		}},
+	)
+	if err != nil {
+		fmt.Printf("Failed to update batch job status: %v\n", err)
+		return
+	}
+
+	// Get OAuth credentials
+	var oauthCred models.OAuthCredential
+	err = s.oauthCollection.FindOne(ctx, bson.M{
+		"school_id": schoolID,
+		"user_id":   teacherID,
+	}).Decode(&oauthCred)
+	if err != nil {
+		s.failBatchJob(ctx, batchJobID, "OAuth credentials not found")
+		return
+	}
+
+	// Get course info
+	var course models.Course
+	err = s.coursesCollection.FindOne(ctx, bson.M{
+		"_id":       courseID,
+		"school_id": schoolID,
+	}).Decode(&course)
+	if err != nil {
+		s.failBatchJob(ctx, batchJobID, "Course not found")
+		return
+	}
+
+	// Process each student
+	for _, studentID := range studentIDs {
+		err := s.processStudentCatchUp(ctx, schoolID, courseID, studentID, teacherID, absenceDate, &oauthCred, &course)
+
+		updateData := bson.M{
+			"$inc": bson.M{"processed_students": 1},
+			"$set": bson.M{"updated_at": time.Now().UTC()},
+		}
+
+		if err != nil {
+			// Check if OAuth error - fail entire batch
+			if errors.Is(err, ErrOAuthTokenInvalid) {
+				s.failBatchJob(ctx, batchJobID, "OAuth token is invalid - please re-authorize")
+				return
+			}
+
+			// Add warning and increment failed count
+			updateData["$inc"].(bson.M)["failed_count"] = 1
+			updateData["$push"] = bson.M{
+				"warnings": fmt.Sprintf("Failed for student %s: %v", studentID.Hex(), err),
+			}
+		} else {
+			updateData["$inc"].(bson.M)["success_count"] = 1
+		}
+
+		_, err = s.batchJobsCollection.UpdateOne(ctx,
+			bson.M{"_id": batchJobID},
+			updateData,
+		)
+		if err != nil {
+			fmt.Printf("Failed to update batch job progress: %v\n", err)
+		}
+	}
+
+	// Mark batch job as completed
+	completedAt := time.Now().UTC()
+	_, err = s.batchJobsCollection.UpdateOne(ctx,
+		bson.M{"_id": batchJobID},
+		bson.M{"$set": bson.M{
+			"status":       models.BatchJobCompleted,
+			"completed_at": completedAt,
+			"updated_at":   completedAt,
+		}},
+	)
+	if err != nil {
+		fmt.Printf("Failed to mark batch job as completed: %v\n", err)
+	}
+
+	fmt.Printf("Batch job %s completed successfully\n", batchJobID.Hex())
+}
+
+// failBatchJob marks a batch job as failed
+func (s *CatchUpService) failBatchJob(ctx context.Context, batchJobID bson.ObjectID, reason string) {
+	now := time.Now().UTC()
+	_, err := s.batchJobsCollection.UpdateOne(ctx,
+		bson.M{"_id": batchJobID},
+		bson.M{"$set": bson.M{
+			"status":         models.BatchJobFailed,
+			"failure_reason": reason,
+			"completed_at":   now,
+			"updated_at":     now,
+		}},
+	)
+	if err != nil {
+		fmt.Printf("Failed to mark batch job as failed: %v\n", err)
+	}
 }
 
 func (s *CatchUpService) GenerateCatchUpForStudents(

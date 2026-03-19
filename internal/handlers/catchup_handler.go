@@ -39,10 +39,11 @@ func (h *CatchUpHandler) GenerateCatchUp(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
-	result, err := h.service.GenerateCatchUpForStudents(ctx, req, userID, schoolID)
+	// Use async processing instead of synchronous
+	result, err := h.service.GenerateCatchUpForStudentsAsync(ctx, req, userID, schoolID)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrInvalidCatchUpCourseID):
@@ -66,4 +67,40 @@ func (h *CatchUpHandler) GenerateCatchUp(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+func (h *CatchUpHandler) GetBatchJobStatus(c *gin.Context) {
+	claims, ok := middleware.GetAuthClaims(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	userID, _ := claims["sub"].(string)
+	schoolID, _ := claims["school_id"].(string)
+	if userID == "" || schoolID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	batchJobID := c.Param("batchJobId")
+	if batchJobID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "batch job id required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	batchJob, err := h.service.GetBatchJobStatus(ctx, batchJobID, userID, schoolID)
+	if err != nil {
+		if err.Error() == "batch job not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "batch job not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get batch job status"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, batchJob)
 }

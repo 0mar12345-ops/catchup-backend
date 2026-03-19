@@ -38,6 +38,35 @@ const (
 	IngestionJobFailed    IngestionJobStatus = "failed"
 )
 
+type BatchJobStatus string
+
+const (
+	BatchJobPending    BatchJobStatus = "pending"
+	BatchJobProcessing BatchJobStatus = "processing"
+	BatchJobCompleted  BatchJobStatus = "completed"
+	BatchJobFailed     BatchJobStatus = "failed"
+)
+
+type BatchCatchUpJob struct {
+	ID                bson.ObjectID   `bson:"_id,omitempty" json:"id"`
+	SchoolID          bson.ObjectID   `bson:"school_id" json:"school_id"`
+	CourseID          bson.ObjectID   `bson:"course_id" json:"course_id"`
+	TeacherID         bson.ObjectID   `bson:"teacher_id" json:"teacher_id"`
+	StudentIDs        []bson.ObjectID `bson:"student_ids" json:"student_ids"`
+	AbsenceDate       time.Time       `bson:"absence_date" json:"absence_date"`
+	Status            BatchJobStatus  `bson:"status" json:"status"`
+	TotalStudents     int             `bson:"total_students" json:"total_students"`
+	ProcessedStudents int             `bson:"processed_students" json:"processed_students"`
+	SuccessCount      int             `bson:"success_count" json:"success_count"`
+	FailedCount       int             `bson:"failed_count" json:"failed_count"`
+	Warnings          []string        `bson:"warnings,omitempty" json:"warnings,omitempty"`
+	FailureReason     string          `bson:"failure_reason,omitempty" json:"failure_reason,omitempty"`
+	StartedAt         *time.Time      `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt       *time.Time      `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	CreatedAt         time.Time       `bson:"created_at" json:"created_at"`
+	UpdatedAt         time.Time       `bson:"updated_at" json:"updated_at"`
+}
+
 type IngestionJob struct {
 	ID                bson.ObjectID      `bson:"_id,omitempty" json:"id"`
 	SchoolID          bson.ObjectID      `bson:"school_id" json:"school_id"`
