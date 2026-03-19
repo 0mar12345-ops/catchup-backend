@@ -309,6 +309,11 @@ func (s *CatchUpService) processBatchJob(
 		return
 	}
 
+	// Track if all failures are due to the same specific error
+	var firstError error
+	allSameError := true
+	hasSuccess := false
+
 	// Process each student
 	for _, studentID := range studentIDs {
 		err := s.processStudentCatchUp(ctx, schoolID, courseID, studentID, teacherID, absenceDate, &oauthCred, &course)
@@ -321,8 +326,17 @@ func (s *CatchUpService) processBatchJob(
 		if err != nil {
 			// Check if OAuth error - fail entire batch
 			if errors.Is(err, ErrOAuthTokenInvalid) {
-				s.failBatchJob(ctx, batchJobID, "OAuth token is invalid - please re-authorize")
+				s.failBatchJob(ctx, batchJobID, "oauth_invalid")
 				return
+			}
+
+			// Track the first error
+			if firstError == nil {
+				firstError = err
+			} else if !errors.Is(err, firstError) &&
+				!(errors.Is(err, ErrNoContentFound) && errors.Is(firstError, ErrNoContentFound)) &&
+				!(errors.Is(err, ErrInsufficientContent) && errors.Is(firstError, ErrInsufficientContent)) {
+				allSameError = false
 			}
 
 			// Add warning and increment failed count
@@ -331,6 +345,8 @@ func (s *CatchUpService) processBatchJob(
 				"warnings": fmt.Sprintf("Failed for student %s: %v", studentID.Hex(), err),
 			}
 		} else {
+			hasSuccess = true
+			allSameError = false
 			updateData["$inc"].(bson.M)["success_count"] = 1
 		}
 
@@ -341,6 +357,20 @@ func (s *CatchUpService) processBatchJob(
 		if err != nil {
 			fmt.Printf("Failed to update batch job progress: %v\n", err)
 		}
+	}
+
+	// Check if all students failed with the same error
+	if !hasSuccess && allSameError && firstError != nil {
+		var failureReason string
+		if errors.Is(firstError, ErrNoContentFound) {
+			failureReason = "no_content_found"
+		} else if errors.Is(firstError, ErrInsufficientContent) {
+			failureReason = "insufficient_content"
+		} else {
+			failureReason = firstError.Error()
+		}
+		s.failBatchJob(ctx, batchJobID, failureReason)
+		return
 	}
 
 	// Mark batch job as completed
