@@ -178,11 +178,16 @@ func (s *CatchUpService) GenerateCatchUpForStudents(
 		Warnings:     []string{},
 	}
 
+	// Track if all failures are due to the same specific error
+	var firstError error
+	allSameError := true
+
 	for _, studentIDStr := range req.StudentIDs {
 		studentOID, err := bson.ObjectIDFromHex(studentIDStr)
 		if err != nil {
 			result.FailedCount++
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Invalid student ID: %s", studentIDStr))
+			allSameError = false
 			continue
 		}
 
@@ -193,6 +198,7 @@ func (s *CatchUpService) GenerateCatchUpForStudents(
 		if err != nil || count == 0 {
 			result.FailedCount++
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Student not found: %s", studentIDStr))
+			allSameError = false
 			continue
 		}
 
@@ -204,10 +210,27 @@ func (s *CatchUpService) GenerateCatchUpForStudents(
 			}
 			result.FailedCount++
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Failed for student %s: %v", studentIDStr, err))
+
+			// Track the first error for potential return
+			if firstError == nil {
+				firstError = err
+			} else if !errors.Is(err, firstError) &&
+				!(errors.Is(err, ErrNoContentFound) && errors.Is(firstError, ErrNoContentFound)) &&
+				!(errors.Is(err, ErrInsufficientContent) && errors.Is(firstError, ErrInsufficientContent)) {
+				allSameError = false
+			}
 			continue
 		}
 
 		result.SuccessCount++
+		allSameError = false // At least one success means not all same error
+	}
+
+	// If all students failed with the same error, return that error
+	if result.SuccessCount == 0 && result.FailedCount > 0 && allSameError && firstError != nil {
+		if errors.Is(firstError, ErrNoContentFound) || errors.Is(firstError, ErrInsufficientContent) {
+			return nil, firstError
+		}
 	}
 
 	if result.SuccessCount > 0 {
