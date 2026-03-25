@@ -80,10 +80,22 @@ func NewUserOAuthService(
 }
 
 func (s *UserOAuthService) GetGoogleAuthURL() string {
+	// Use prompt=consent to ensure we always get a refresh token
+	// This is necessary because Google only provides refresh tokens on first auth
+	// or when forcing consent. Without this, returning users who lost their
+	// refresh token (e.g., revoked access) won't be able to reconnect properly.
 	return s.config.AuthCodeURL(
 		s.state,
 		oauth2.AccessTypeOffline,
-		oauth2.SetAuthURLParam("prompt", "select_account"),
+		oauth2.ApprovalForce, // Equivalent to prompt=consent
+	)
+}
+
+func (s *UserOAuthService) GetGoogleAuthURLWithConsent() string {
+	return s.config.AuthCodeURL(
+		s.state,
+		oauth2.AccessTypeOffline,
+		oauth2.ApprovalForce, // Forces consent screen to get new refresh token
 	)
 }
 
@@ -268,6 +280,17 @@ func (s *UserOAuthService) HandleGoogleCallback(ctx context.Context, state, code
 	teacher, err := s.upsertTeacher(ctx, school.ID, userInfo, now)
 	if err != nil {
 		return nil, err
+	}
+
+	// Check if we have an existing OAuth credential with a refresh token
+	var existingCred *models.OAuthCredential
+	existingCred, _ = s.GetOAuthCredential(ctx, teacher.ID, school.ID)
+
+	// If no refresh token in new token AND no existing refresh token, this is a problem
+	if token.RefreshToken == "" && (existingCred == nil || existingCred.RefreshTokenEnc == "") {
+		fmt.Printf("WARNING: No refresh token available for user %s - user needs to re-authorize with consent\n", teacher.ID.Hex())
+		// We'll save the OAuth credential but without a refresh token
+		// The system will detect this and prompt for re-authorization when needed
 	}
 
 	if err := s.upsertOAuthCredential(ctx, school.ID, teacher.ID, token, grantedScopes, now); err != nil {
@@ -557,16 +580,28 @@ func (s *UserOAuthService) upsertOAuthCredential(
 		"provider":  string(models.ProviderGoogleOAuth),
 	}
 
+	// Build update document
+	setFields := bson.M{
+		"scopes":              grantedScopes,
+		"access_token_enc":    token.AccessToken,
+		"access_token_expiry": token.Expiry,
+		"status":              "valid",
+		"granted_at":          now,
+		"updated_at":          now,
+	}
+
+	// Only update refresh token if Google provided a new one
+	// Google only returns refresh token on first authorization or with prompt=consent
+	// If not provided, we preserve the existing refresh token
+	if token.RefreshToken != "" {
+		setFields["refresh_token_enc"] = token.RefreshToken
+		fmt.Printf("Received new refresh token for user %s\n", userID.Hex())
+	} else {
+		fmt.Printf("No refresh token in response for user %s - preserving existing token\n", userID.Hex())
+	}
+
 	update := bson.M{
-		"$set": bson.M{
-			"scopes":              grantedScopes,
-			"refresh_token_enc":   token.RefreshToken,
-			"access_token_enc":    token.AccessToken,
-			"access_token_expiry": token.Expiry,
-			"status":              "valid",
-			"granted_at":          now,
-			"updated_at":          now,
-		},
+		"$set": setFields,
 		"$setOnInsert": bson.M{
 			"_id":        bson.NewObjectID(),
 			"school_id":  schoolID,

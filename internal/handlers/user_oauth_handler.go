@@ -195,8 +195,8 @@ func (h *UserOAuthHandler) GetReauthorizeURL(c *gin.Context) {
 		return
 	}
 
-	// Return the standard OAuth URL (prompt=select_account)
-	authURL := h.service.GetGoogleAuthURL()
+	// Use consent flow to force getting a new refresh token
+	authURL := h.service.GetGoogleAuthURLWithConsent()
 
 	c.JSON(http.StatusOK, gin.H{
 		"auth_url": authURL,

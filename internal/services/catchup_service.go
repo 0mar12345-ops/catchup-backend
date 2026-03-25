@@ -178,6 +178,16 @@ func (s *CatchUpService) GenerateCatchUpForStudentsAsync(
 		return nil, errors.New("oauth credentials not found")
 	}
 
+	// Proactively validate and refresh OAuth token BEFORE starting batch job
+	// This ensures we fail fast if tokens are invalid/expired rather than mid-processing
+	_, err = s.userOAuthService.RefreshOAuthToken(ctx, &oauthCred)
+	if err != nil {
+		// Token refresh failed - credentials are invalid
+		// User needs to re-authorize before generating catchups
+		return nil, ErrOAuthTokenInvalid
+	}
+	fmt.Printf("OAuth token validated successfully for user %s\n", userOID.Hex())
+
 	// Validate student IDs and convert to ObjectIDs
 	studentOIDs := make([]bson.ObjectID, 0, len(req.StudentIDs))
 	for _, studentIDStr := range req.StudentIDs {
@@ -298,6 +308,15 @@ func (s *CatchUpService) processBatchJob(
 		return
 	}
 
+	// Validate OAuth token before processing batch
+	// This was already done when creating the job, but check again in case it expired
+	_, err = s.userOAuthService.RefreshOAuthToken(ctx, &oauthCred)
+	if err != nil {
+		fmt.Printf("OAuth token refresh failed in batch processing: %v\n", err)
+		s.failBatchJob(ctx, batchJobID, "oauth_invalid")
+		return
+	}
+
 	// Get course info
 	var course models.Course
 	err = s.coursesCollection.FindOne(ctx, bson.M{
@@ -315,7 +334,21 @@ func (s *CatchUpService) processBatchJob(
 	hasSuccess := false
 
 	// Process each student
-	for _, studentID := range studentIDs {
+	for i, studentID := range studentIDs {
+		// Re-fetch OAuth credentials periodically (every 5 students) to pick up any token refreshes
+		// This ensures we always have the latest access token if it was refreshed during processing
+		if i > 0 && i%5 == 0 {
+			err := s.oauthCollection.FindOne(ctx, bson.M{
+				"school_id": schoolID,
+				"user_id":   teacherID,
+			}).Decode(&oauthCred)
+			if err != nil {
+				fmt.Printf("Failed to re-fetch OAuth credentials: %v\n", err)
+			} else {
+				fmt.Printf("Re-fetched OAuth credentials (student %d/%d)\n", i+1, len(studentIDs))
+			}
+		}
+
 		err := s.processStudentCatchUp(ctx, schoolID, courseID, studentID, teacherID, absenceDate, &oauthCred, &course)
 
 		updateData := bson.M{
@@ -453,6 +486,15 @@ func (s *CatchUpService) GenerateCatchUpForStudents(
 	if err != nil {
 		return nil, errors.New("oauth credentials not found")
 	}
+
+	// Proactively validate and refresh OAuth token BEFORE processing
+	// This ensures we fail fast if tokens are invalid/expired
+	_, err = s.userOAuthService.RefreshOAuthToken(ctx, &oauthCred)
+	if err != nil {
+		// Token refresh failed - credentials are invalid
+		return nil, ErrOAuthTokenInvalid
+	}
+	fmt.Printf("OAuth token validated successfully for user %s\n", userOID.Hex())
 
 	result := &GenerateCatchUpResult{
 		SuccessCount: 0,
