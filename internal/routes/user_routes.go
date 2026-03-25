@@ -27,7 +27,6 @@ func registerUserRoutes(api *gin.RouterGroup, deps Dependencies) {
 
 	users := api.Group("/users")
 	{
-		users.POST("/check-email", oauthHandler.CheckEmail)
 		users.GET("/oauth/google", oauthHandler.GoogleOAuthStart)
 		users.GET("/oauth/google/callback", oauthHandler.GoogleOAuthCallback)
 

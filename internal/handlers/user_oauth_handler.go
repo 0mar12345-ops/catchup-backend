@@ -50,33 +50,6 @@ func (h *UserOAuthHandler) GoogleOAuthStart(c *gin.Context) {
 	})
 }
 
-func (h *UserOAuthHandler) CheckEmail(c *gin.Context) {
-	var req struct {
-		Email string `json:"email" binding:"required,email"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid email format"})
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
-
-	exists, err := h.service.CheckUserExistsByEmail(ctx, req.Email)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check email"})
-		return
-	}
-
-	authURL := h.service.GetGoogleAuthURLWithPrompt(!exists)
-
-	c.JSON(http.StatusOK, gin.H{
-		"exists":   exists,
-		"auth_url": authURL,
-	})
-}
-
 func (h *UserOAuthHandler) GoogleOAuthCallback(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
@@ -222,8 +195,8 @@ func (h *UserOAuthHandler) GetReauthorizeURL(c *gin.Context) {
 		return
 	}
 
-	// Force consent to ensure we get a fresh refresh token
-	authURL := h.service.GetGoogleAuthURLWithPrompt(true)
+	// Return the standard OAuth URL (prompt=select_account)
+	authURL := h.service.GetGoogleAuthURL()
 
 	c.JSON(http.StatusOK, gin.H{
 		"auth_url": authURL,

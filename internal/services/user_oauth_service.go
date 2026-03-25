@@ -80,14 +80,6 @@ func NewUserOAuthService(
 }
 
 func (s *UserOAuthService) GetGoogleAuthURL() string {
-	return s.config.AuthCodeURL(s.state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-}
-
-func (s *UserOAuthService) GetGoogleAuthURLWithPrompt(forceConsent bool) string {
-	if forceConsent {
-		return s.config.AuthCodeURL(s.state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-	}
-
 	return s.config.AuthCodeURL(
 		s.state,
 		oauth2.AccessTypeOffline,
@@ -197,14 +189,6 @@ func (s *UserOAuthService) GetOAuthCredential(ctx context.Context, userID, schoo
 		return nil, err
 	}
 	return &oauthCred, nil
-}
-
-func (s *UserOAuthService) CheckUserExistsByEmail(ctx context.Context, email string) (bool, error) {
-	count, err := s.usersCollection.CountDocuments(ctx, bson.M{"email": email})
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
 }
 
 type MeData struct {
