@@ -34,7 +34,10 @@ var (
 	ErrOAuthTokenInvalid       = errors.New("oauth token is invalid - user needs to re-authorize")
 )
 
-const MinWordCountThreshold = 300
+const (
+	MinWordCountThreshold   = 100 // Lowered from 300 — announcements with mixed content typically have 50–150 words
+	ContentFetchTimeoutSecs = 60  // Per-file download timeout in seconds
+)
 
 type CatchUpService struct {
 	coursesCollection          *mongo.Collection
@@ -646,9 +649,14 @@ func (s *CatchUpService) processStudentCatchUp(
 		return err
 	}
 
-	if !extractedContent.MeetsThreshold {
-		s.failIngestionJob(processCtx, ingestionJob.ID, "insufficient content - word count below threshold")
+	if extractedContent.WordCount == 0 {
+		s.failIngestionJob(processCtx, ingestionJob.ID, "no usable text content found in any classroom material")
 		return ErrInsufficientContent
+	}
+	if !extractedContent.MeetsThreshold {
+		// Log warning but proceed — the AI can still generate a useful lesson from limited content
+		fmt.Printf("Content below threshold (%d words < %d required) but attempting generation for lesson\n",
+			extractedContent.WordCount, MinWordCountThreshold)
 	}
 
 	catchUpLesson := models.CatchUpLesson{
@@ -1010,7 +1018,9 @@ func (s *CatchUpService) fetchAnnouncements(ctx context.Context, client *http.Cl
 
 func (s *CatchUpService) courseWorkToContentItem(cw googleCourseWork, schoolID, courseID, ingestionJobID bson.ObjectID, now time.Time) models.ContentItem {
 	attachments := s.parseMaterials(cw.Materials)
-	included := len(attachments) > 0 && hasTextContent(cw.Description, attachments)
+	// Include if there's any content at all: description text OR any attachments (supported or not)
+	// Unsupported attachments (YouTube, links) still contribute metadata/title as context
+	included := len(strings.TrimSpace(cw.Description)) > 0 || len(attachments) > 0
 
 	item := models.ContentItem{
 		ID:             bson.NewObjectID(),
@@ -1032,7 +1042,7 @@ func (s *CatchUpService) courseWorkToContentItem(cw googleCourseWork, schoolID, 
 	}
 
 	if !included {
-		item.ExcludedNotes = append(item.ExcludedNotes, "No supported attachments or insufficient text")
+		item.ExcludedNotes = append(item.ExcludedNotes, "No content found")
 	}
 
 	return item
@@ -1040,7 +1050,8 @@ func (s *CatchUpService) courseWorkToContentItem(cw googleCourseWork, schoolID, 
 
 func (s *CatchUpService) materialToContentItem(mat googleCourseMaterial, schoolID, courseID, ingestionJobID bson.ObjectID, now time.Time) models.ContentItem {
 	attachments := s.parseMaterials(mat.Materials)
-	included := len(attachments) > 0 && hasTextContent(mat.Description, attachments)
+	// Include if there's any content at all: description text OR any attachments (supported or not)
+	included := len(strings.TrimSpace(mat.Description)) > 0 || len(attachments) > 0
 
 	item := models.ContentItem{
 		ID:             bson.NewObjectID(),
@@ -1062,7 +1073,7 @@ func (s *CatchUpService) materialToContentItem(mat googleCourseMaterial, schoolI
 	}
 
 	if !included {
-		item.ExcludedNotes = append(item.ExcludedNotes, "No supported attachments or insufficient text")
+		item.ExcludedNotes = append(item.ExcludedNotes, "No content found")
 	}
 
 	return item
@@ -1757,12 +1768,31 @@ func (s *CatchUpService) extractAndCombineText(
 
 		for _, att := range item.Attachments {
 			if !att.IsSupported {
-				warnings = append(warnings, fmt.Sprintf("Unsupported attachment: %s (%s)", att.Title, att.Kind))
+				// For YouTube videos and external links, add title/URL as context
+				// so the AI can reference them even without extracting full text
+				switch att.Kind {
+				case models.AttachmentKindVideo:
+					if att.Title != "" {
+						combinedParts = append(combinedParts, fmt.Sprintf("[Video lesson: %s]", att.Title))
+					}
+				case models.AttachmentKindExternalURL:
+					if att.Title != "" {
+						combinedParts = append(combinedParts, fmt.Sprintf("[Reference material: %s]", att.Title))
+					} else if att.URL != "" {
+						combinedParts = append(combinedParts, fmt.Sprintf("[Reference: %s]", att.URL))
+					}
+				default:
+					warnings = append(warnings, fmt.Sprintf("Unsupported attachment: %s (%s)", att.Title, att.Kind))
+				}
 				continue
 			}
 
-			text, err := s.extractTextFromAttachment(ctx, oauthCred, att)
+			// Add per-file timeout to prevent a single slow download from hanging the entire job
+			attCtx, attCancel := context.WithTimeout(ctx, time.Duration(ContentFetchTimeoutSecs)*time.Second)
+			text, err := s.extractTextFromAttachment(attCtx, oauthCred, att)
+			attCancel()
 			if err != nil {
+				fmt.Printf("Warning: failed to extract text from '%s': %v — skipping attachment\n", att.Title, err)
 				warnings = append(warnings, fmt.Sprintf("Failed to extract text from %s: %v", att.Title, err))
 				continue
 			}
