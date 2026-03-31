@@ -35,8 +35,11 @@ var (
 )
 
 const (
-	MinWordCountThreshold   = 100 // Lowered from 300 — announcements with mixed content typically have 50–150 words
-	ContentFetchTimeoutSecs = 60  // Per-file download timeout in seconds
+	MinWordCountThreshold   = 100              // Lowered from 300 — announcements with mixed content typically have 50–150 words
+	ContentFetchTimeoutSecs = 60               // Per-file download timeout in seconds
+	LargePDFThresholdBytes  = 15 * 1024 * 1024 // 15 MB — PDFs larger than this are reference-only (e.g. full textbooks)
+	MaxPDFPagesExtract      = 30               // Maximum pages to extract from any PDF (prevents hanging on large textbooks)
+	MaxCombinedTextChars    = 20000            // Maximum characters sent to AI (prevents token overflow)
 )
 
 type CatchUpService struct {
@@ -1081,7 +1084,9 @@ func (s *CatchUpService) materialToContentItem(mat googleCourseMaterial, schoolI
 
 func (s *CatchUpService) announcementToContentItem(ann googleAnnouncement, schoolID, courseID, ingestionJobID bson.ObjectID, now time.Time) models.ContentItem {
 	attachments := s.parseMaterials(ann.Materials)
-	included := len(ann.Text) > 0 || (len(attachments) > 0 && hasTextContent(ann.Text, attachments))
+	// Include if there is any text body OR any attachments (even unsupported ones like YouTube/links
+	// provide title context for the AI to generate action items)
+	included := len(strings.TrimSpace(ann.Text)) > 0 || len(attachments) > 0
 
 	item := models.ContentItem{
 		ID:             bson.NewObjectID(),
@@ -1435,33 +1440,36 @@ func (s *CatchUpService) extractFromPDF(ctx context.Context, client *http.Client
 		return "", fmt.Errorf("drive API error downloading PDF: %d - %s", resp.StatusCode, string(body))
 	}
 
-	// Check PDF size before downloading (max 50 MB)
-	contentLength := resp.ContentLength
-	if contentLength > 50*1024*1024 {
-		return "", fmt.Errorf("PDF file too large: %d bytes (max 50 MB)", contentLength)
-	}
-
-	pdfData, err := io.ReadAll(resp.Body)
+	// Use a hard-capped reader — files larger than LargePDFThresholdBytes (15 MB) are almost certainly
+	// full textbooks or large reference documents that should not be fully extracted.
+	// Reading +1 byte lets us detect when the file exceeds the threshold without downloading it all.
+	limitedReader := io.LimitReader(resp.Body, int64(LargePDFThresholdBytes)+1)
+	pdfData, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return "", fmt.Errorf("failed to read PDF data: %w", err)
 	}
 
-	fmt.Printf("Downloaded PDF, size: %d bytes (%.2f MB)\n", len(pdfData), float64(len(pdfData))/(1024*1024))
+	// If we read more data than the threshold the file is a large reference document.
+	// Return a reference marker so the AI can generate an action item instead of hanging.
+	if len(pdfData) > LargePDFThresholdBytes {
+		fmt.Printf("Large PDF detected (>%.0f MB) — treating as reference material, not extracting\n",
+			float64(LargePDFThresholdBytes)/(1024*1024))
+		return "[Large reference document — students should review this material as directed by their teacher]", nil
+	}
 
-	text, err := s.extractTextFromPDFBytes(pdfData)
+	fmt.Printf("Downloaded PDF: %d bytes (%.2f MB)\n", len(pdfData), float64(len(pdfData))/(1024*1024))
+
+	text, err := s.extractTextFromPDFBytes(pdfData, MaxPDFPagesExtract)
 	if err == nil && len(strings.Fields(text)) >= 50 {
 		return text, nil
 	}
 
-	// Check if we got good results from standard extraction
 	pdfSizeMB := float64(len(pdfData)) / (1024 * 1024)
 	wordCount := len(strings.Fields(text))
 
 	fmt.Printf("Standard PDF extraction: %.2f MB, %d words extracted\n", pdfSizeMB, wordCount)
 
-	// If standard extraction got good results (>=50 words), return immediately
 	if wordCount >= 50 {
-		fmt.Printf("Standard extraction successful with %d words\n", wordCount)
 		return text, nil
 	}
 
@@ -1503,7 +1511,7 @@ func (s *CatchUpService) extractFromPDF(ctx context.Context, client *http.Client
 	return "", fmt.Errorf("PDF text extraction failed: PDF appears to be scanned/image-based. Standard extraction: %d words, OCR: failed, OpenAI: unavailable/failed", wordCount)
 }
 
-func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte) (string, error) {
+func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte, pageLimit int) (string, error) {
 	tmpFile, err := os.CreateTemp("", "pdf-extract-*.pdf")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
@@ -1526,11 +1534,11 @@ func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte) (string, error)
 	var textParts []string
 	totalPages := pdfReader.NumPage()
 
-	// Limit to first 200 pages for large PDFs to prevent excessive processing
+	// Limit to the caller-specified page cap (default: MaxPDFPagesExtract = 30)
 	maxPages := totalPages
-	if maxPages > 200 {
-		fmt.Printf("PDF has %d pages, limiting extraction to first 200 pages\n", totalPages)
-		maxPages = 200
+	if maxPages > pageLimit {
+		fmt.Printf("PDF has %d pages, limiting extraction to first %d pages\n", totalPages, pageLimit)
+		maxPages = pageLimit
 	}
 
 	for pageNum := 1; pageNum <= maxPages; pageNum++ {
@@ -1590,11 +1598,11 @@ func (s *CatchUpService) extractWithTesseractOCR(ctx context.Context, pdfData []
 
 	var textParts []string
 
-	// OCR each image (limit to first 50 pages to prevent excessive processing)
+	// OCR each image, capped at MaxPDFPagesExtract to prevent excessive processing
 	maxPages := len(images)
-	if maxPages > 50 {
-		fmt.Printf("Limiting OCR to first 50 pages (PDF has %d pages)\n", len(images))
-		maxPages = 50
+	if maxPages > MaxPDFPagesExtract {
+		fmt.Printf("Limiting OCR to first %d pages (PDF has %d pages)\n", MaxPDFPagesExtract, len(images))
+		maxPages = MaxPDFPagesExtract
 	}
 
 	for i := 0; i < maxPages; i++ {
@@ -1674,10 +1682,10 @@ func (s *CatchUpService) convertPDFToImages(pdfData []byte) ([]image.Image, erro
 
 	var images []image.Image
 
-	// Limit to first 50 pages for large PDFs
+	// Limit pages for image conversion — capped at MaxPDFPagesExtract
 	maxPages := numPages
-	if maxPages > 50 {
-		maxPages = 50
+	if maxPages > MaxPDFPagesExtract {
+		maxPages = MaxPDFPagesExtract
 	}
 
 	for i := 0; i < maxPages; i++ {
@@ -1849,14 +1857,29 @@ func (s *CatchUpService) generateAIContent(ctx context.Context, extractedContent
 
 	fmt.Printf("Starting AI content generation for course: %s, word count: %d\n", course.Name, extractedContent.WordCount)
 
+	// Truncate combined text to prevent token overflow with large documents
+	contentText := extractedContent.CombinedText
+	if len(contentText) > MaxCombinedTextChars {
+		contentText = contentText[:MaxCombinedTextChars] +
+			"\n\n[Content truncated — remaining material should be reviewed by the student directly]"
+		fmt.Printf("Truncated content from %d to %d chars for AI generation\n",
+			len(extractedContent.CombinedText), MaxCombinedTextChars)
+	}
+
 	client := openai.NewClient(s.config.OpenAIAPIKey)
 
 	prompt := fmt.Sprintf(`You are an educational AI assistant helping create a catch-up lesson for a student who missed class.
 
 Course: %s
 
-Content the student missed (extracted from class materials):
+Class content from the day the student missed:
 %s
+
+IMPORTANT — how to handle special content markers:
+- "[Large reference document — ...]" means a large textbook or document was attached. Generate an action item like "Review the relevant chapter in the provided textbook" — do NOT try to summarise it.
+- "[Video lesson: <title>]" means a video was assigned. Generate an action item like "Watch the assigned video: <title>".
+- "[Reference material: <title>]" means an external link was shared (e.g. Edrolo, Khan Academy). Generate an action item like "Complete the assigned activity: <title>".
+For all other extracted text, summarise and explain the lesson content as normal.
 
 Your task:
 1. Create a concise, engaging title for this catch-up lesson (max 60 characters)
@@ -1903,7 +1926,7 @@ Please respond in the following JSON format:
   ]
 }
 
-IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic HTML tags to structure the content properly.`, course.Name, extractedContent.CombinedText)
+IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic HTML tags to structure the content properly.`, course.Name, contentText)
 
 	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: openai.GPT4oMini,
@@ -1918,7 +1941,7 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 			},
 		},
 		Temperature: 0.7,
-		MaxTokens:   2000,
+		MaxTokens:   3000,
 	})
 
 	if err != nil {
