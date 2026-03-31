@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
@@ -1748,6 +1749,329 @@ func (s *CatchUpService) extractWithOpenAIVision(ctx context.Context, fileData [
 	return strings.TrimSpace(extractedText), nil
 }
 
+// fetchYouTubeTranscript attempts to retrieve an English transcript for the given YouTube video ID
+// using yt-dlp (most reliable). Falls back to unofficial API if yt-dlp is not available.
+// Returns (transcript, hasTranscript, error). A false hasTranscript means no captions are available.
+func (s *CatchUpService) fetchYouTubeTranscript(ctx context.Context, videoID string) (string, bool, error) {
+	if videoID == "" {
+		return "", false, nil
+	}
+
+	fmt.Printf("[YouTube] Fetching transcript for video ID: %s\n", videoID)
+
+	// Try yt-dlp first (most reliable)
+	if s.isYtDlpAvailable() {
+		transcript, hasTranscript, err := s.fetchTranscriptWithYtDlp(ctx, videoID)
+		if err == nil && hasTranscript && transcript != "" {
+			fmt.Printf("[YouTube] ✓ Successfully fetched transcript via yt-dlp (video: %s, length: %d chars)\n", videoID, len(transcript))
+			return transcript, true, nil
+		}
+		if err != nil {
+			fmt.Printf("[YouTube] yt-dlp failed for %s: %v, trying fallback methods...\n", videoID, err)
+		}
+	} else {
+		fmt.Printf("[YouTube] yt-dlp not available, using fallback API methods\n")
+	}
+
+	// Fallback to simple API
+	transcript, hasTranscript, _ := s.trySimpleTranscriptFetch(ctx, videoID)
+	if hasTranscript && transcript != "" {
+		fmt.Printf("[YouTube] ✓ Successfully fetched transcript via simple API (video: %s, length: %d chars)\n", videoID, len(transcript))
+		return transcript, true, nil
+	}
+
+	// Final fallback: page extraction
+	fmt.Printf("[YouTube] Simple API failed for %s, trying page extraction method...\n", videoID)
+	transcript, hasTranscript, _ = s.extractTranscriptFromVideoPage(ctx, videoID)
+	if hasTranscript && transcript != "" {
+		fmt.Printf("[YouTube] ✓ Successfully fetched transcript via page extraction (video: %s, length: %d chars)\n", videoID, len(transcript))
+		return transcript, true, nil
+	}
+
+	// No transcript available
+	fmt.Printf("[YouTube] ✗ No transcript available for video: %s\n", videoID)
+	return "", false, nil
+}
+
+// isYtDlpAvailable checks if yt-dlp is installed on the system
+func (s *CatchUpService) isYtDlpAvailable() bool {
+	cmd := exec.Command("yt-dlp", "--version")
+	err := cmd.Run()
+	return err == nil
+}
+
+// fetchTranscriptWithYtDlp uses youtube-transcript-api (Python) to fetch subtitles,
+// which is the most reliable method. Falls back to yt-dlp file download if unavailable.
+func (s *CatchUpService) fetchTranscriptWithYtDlp(ctx context.Context, videoID string) (string, bool, error) {
+	fmt.Printf("[YouTube Debug] Trying youtube-transcript-api (Python) for %s\n", videoID)
+
+	// Use youtube-transcript-api Python library - most reliable method
+	pythonScript := fmt.Sprintf(`
+from youtube_transcript_api import YouTubeTranscriptApi
+import sys, json
+try:
+    api = YouTubeTranscriptApi()
+    transcript = api.fetch('%s')
+    texts = [s.text for s in transcript.snippets]
+    print(' '.join(texts))
+except Exception as e:
+    sys.stderr.write(str(e))
+    sys.exit(1)
+`, videoID)
+
+	cmd := exec.CommandContext(ctx, "python3", "-c", pythonScript)
+	output, err := cmd.Output()
+	if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		transcript := strings.TrimSpace(string(output))
+		fmt.Printf("[YouTube Debug] youtube-transcript-api success: %d chars\n", len(transcript))
+		return transcript, true, nil
+	}
+
+	if stderr, ok := err.(*exec.ExitError); ok {
+		fmt.Printf("[YouTube Debug] youtube-transcript-api failed: %s\n", string(stderr.Stderr))
+	} else if err != nil {
+		fmt.Printf("[YouTube Debug] youtube-transcript-api error: %v\n", err)
+	}
+
+	return "", false, nil
+}
+
+// parseJSON3Subtitles parses YouTube's json3 subtitle format
+func (s *CatchUpService) parseJSON3Subtitles(data []byte) (string, error) {
+	// YouTube's json3 format structure
+	type segment struct {
+		Utf8 string `json:"utf8"`
+	}
+	type event struct {
+		Segs []segment `json:"segs"`
+	}
+	type json3Format struct {
+		Events []event `json:"events"`
+	}
+
+	var parsed json3Format
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return "", fmt.Errorf("JSON parsing failed: %w", err)
+	}
+
+	var textParts []string
+	for _, evt := range parsed.Events {
+		for _, seg := range evt.Segs {
+			text := strings.TrimSpace(seg.Utf8)
+			if text != "" && text != "\n" {
+				textParts = append(textParts, text)
+			}
+		}
+	}
+
+	if len(textParts) == 0 {
+		return "", nil
+	}
+
+	transcript := strings.Join(textParts, " ")
+
+	// Clean up common subtitle artifacts
+	transcript = strings.ReplaceAll(transcript, "  ", " ")
+	transcript = strings.ReplaceAll(transcript, "\n\n", "\n")
+	transcript = strings.TrimSpace(transcript)
+
+	return transcript, nil
+}
+
+func (s *CatchUpService) trySimpleTranscriptFetch(ctx context.Context, videoID string) (string, bool, error) {
+	transcriptURL := fmt.Sprintf(
+		"https://www.youtube.com/api/timedtext?v=%s&lang=en",
+		url.QueryEscape(videoID),
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", transcriptURL, nil)
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", false, nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return "", false, err
+	}
+
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return "", false, nil
+	}
+
+	return s.parseTranscriptXML(body)
+}
+
+func (s *CatchUpService) extractTranscriptFromVideoPage(ctx context.Context, videoID string) (string, bool, error) {
+	videoPageURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", videoPageURL, nil)
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[YouTube Debug] Video page returned status %d for video %s\n", resp.StatusCode, videoID)
+		return "", false, fmt.Errorf("video page returned status %d", resp.StatusCode)
+	}
+
+	// Read the HTML page
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024)) // 2MB limit
+	if err != nil {
+		return "", false, err
+	}
+
+	// Extract the captionTracks JSON from the page
+	// Look for: "captionTracks":[{"baseUrl":"...
+	pageHTML := string(body)
+	captionTracksIdx := strings.Index(pageHTML, `"captionTracks":`)
+	if captionTracksIdx == -1 {
+		fmt.Printf("[YouTube Debug] No captionTracks found in video page for %s\n", videoID)
+		return "", false, nil
+	}
+
+	fmt.Printf("[YouTube Debug] Found captionTracks at index %d for video %s\n", captionTracksIdx, videoID)
+
+	// Extract the baseUrl from the first caption track
+	baseURLStart := strings.Index(pageHTML[captionTracksIdx:], `"baseUrl":"`)
+	if baseURLStart == -1 {
+		fmt.Printf("[YouTube Debug] No baseUrl found in captionTracks for video %s\n", videoID)
+		return "", false, nil
+	}
+	baseURLStart += captionTracksIdx + len(`"baseUrl":"`)
+
+	baseURLEnd := strings.Index(pageHTML[baseURLStart:], `"`)
+	if baseURLEnd == -1 {
+		fmt.Printf("[YouTube Debug] No closing quote for baseUrl for video %s\n", videoID)
+		return "", false, nil
+	}
+
+	// The baseUrl is URL-escaped in the JSON, so we need to unescape it
+	escapedURL := pageHTML[baseURLStart : baseURLStart+baseURLEnd]
+	timedtextURL := strings.ReplaceAll(escapedURL, `\u0026`, "&")
+
+	// Also handle other common escape sequences
+	timedtextURL = strings.ReplaceAll(timedtextURL, `\/`, "/")
+	timedtextURL = strings.ReplaceAll(timedtextURL, `\u003d`, "=")
+
+	fmt.Printf("[YouTube Debug] Extracted timedtext URL (length: %d): %s\n", len(timedtextURL), timedtextURL)
+
+	// Now fetch the transcript using the extracted URL
+	transcript, hasTranscript, err := s.fetchTranscriptFromURL(ctx, timedtextURL)
+
+	if err != nil {
+		fmt.Printf("[YouTube Debug] fetchTranscriptFromURL error: %v\n", err)
+	}
+	if !hasTranscript {
+		fmt.Printf("[YouTube Debug] fetchTranscriptFromURL returned hasTranscript=false\n")
+	}
+	if transcript == "" {
+		fmt.Printf("[YouTube Debug] fetchTranscriptFromURL returned empty transcript\n")
+	}
+
+	return transcript, hasTranscript, err
+}
+
+func (s *CatchUpService) fetchTranscriptFromURL(ctx context.Context, timedtextURL string) (string, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", timedtextURL, nil)
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Printf("[YouTube Debug] HTTP request to timedtext URL failed: %v\n", err)
+		return "", false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[YouTube Debug] Timedtext URL returned status %d\n", resp.StatusCode)
+		bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		fmt.Printf("[YouTube Debug] Response preview: %s\n", string(bodyPreview))
+		return "", false, fmt.Errorf("transcript fetch returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return "", false, err
+	}
+
+	fmt.Printf("[YouTube Debug] Fetched timedtext data, length: %d bytes\n", len(body))
+	if len(body) > 0 {
+		previewLen := 200
+		if len(body) < previewLen {
+			previewLen = len(body)
+		}
+		fmt.Printf("[YouTube Debug] First %d chars of response: %s\n", previewLen, string(body[:previewLen]))
+	}
+
+	return s.parseTranscriptXML(body)
+}
+
+func (s *CatchUpService) parseTranscriptXML(data []byte) (string, bool, error) {
+	type textEntry struct {
+		Text string `xml:",chardata"`
+	}
+	type transcriptXML struct {
+		Texts []textEntry `xml:"text"`
+	}
+
+	var parsed transcriptXML
+	if err := xml.Unmarshal(data, &parsed); err != nil {
+		fmt.Printf("[YouTube Debug] XML parsing failed: %v\n", err)
+		previewLen := 300
+		if len(data) < previewLen {
+			previewLen = len(data)
+		}
+		fmt.Printf("[YouTube Debug] Data to parse (first %d chars): %s\n", previewLen, string(data[:previewLen]))
+		return "", false, fmt.Errorf("failed to parse transcript XML: %w", err)
+	}
+
+	fmt.Printf("[YouTube Debug] XML parsed successfully, found %d text entries\n", len(parsed.Texts))
+
+	if len(parsed.Texts) == 0 {
+		return "", false, nil
+	}
+
+	var parts []string
+	for _, t := range parsed.Texts {
+		text := strings.TrimSpace(t.Text)
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+
+	if len(parts) == 0 {
+		fmt.Printf("[YouTube Debug] No non-empty text parts found after parsing\n")
+		return "", false, nil
+	}
+
+	transcript := strings.Join(parts, " ")
+	fmt.Printf("[YouTube Debug] Successfully extracted transcript: %d words\n", len(strings.Fields(transcript)))
+	return transcript, true, nil
+}
+
 func (s *CatchUpService) extractAndCombineText(
 	ctx context.Context,
 	schoolID, courseID, absenceRecordID, ingestionJobID bson.ObjectID,
@@ -1776,12 +2100,26 @@ func (s *CatchUpService) extractAndCombineText(
 
 		for _, att := range item.Attachments {
 			if !att.IsSupported {
-				// For YouTube videos and external links, add title/URL as context
-				// so the AI can reference them even without extracting full text
 				switch att.Kind {
 				case models.AttachmentKindVideo:
-					if att.Title != "" {
-						combinedParts = append(combinedParts, fmt.Sprintf("[Video lesson: %s]", att.Title))
+					// Attempt to fetch the YouTube transcript (15-second timeout per video)
+					if att.ExternalID != "" {
+						transcriptCtx, transcriptCancel := context.WithTimeout(ctx, 15*time.Second)
+						transcript, hasTranscript, transcriptErr := s.fetchYouTubeTranscript(transcriptCtx, att.ExternalID)
+						fmt.Printf("YouTube transcript result — hasTranscript: %v, transcript: %s, err: %v\n", hasTranscript, transcript, transcriptErr)
+						transcriptCancel()
+						if transcriptErr != nil {
+							fmt.Printf("YouTube transcript error for '%s' (id=%s): %v\n", att.Title, att.ExternalID, transcriptErr)
+						}
+						if hasTranscript && transcript != "" {
+							fmt.Printf("YouTube transcript fetched for '%s': %d words\n", att.Title, len(strings.Fields(transcript)))
+							combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_WITH_TRANSCRIPT: %s]\n%s", att.Title, transcript))
+						} else {
+							fmt.Printf("No transcript available for YouTube video '%s' — using title only\n", att.Title)
+							combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_TITLE_ONLY: %s]", att.Title))
+						}
+					} else if att.Title != "" {
+						combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_TITLE_ONLY: %s]", att.Title))
 					}
 				case models.AttachmentKindExternalURL:
 					if att.Title != "" {
@@ -1876,9 +2214,9 @@ Class content from the day the student missed:
 %s
 
 IMPORTANT — how to handle special content markers:
+- "[VIDEO_WITH_TRANSCRIPT: <title>]" followed by transcript text: Use the transcript to explain the video content as part of the lesson. Summarise and explain it normally.
+- "[VIDEO_TITLE_ONLY: <title>]" means no transcript was available. You MUST include this disclaimer in the explanation: "This summary is based on the video title only. Please watch the video for full understanding." Do NOT invent content from the title.
 - "[Large reference document — ...]" means a large textbook or document was attached. Generate an action item like "Review the relevant chapter in the provided textbook" — do NOT try to summarise it.
-- "[Video lesson: <title>]" means a video was assigned. Generate an action item like "Watch the assigned video: <title>".
-- "[Reference material: <title>]" means an external link was shared (e.g. Edrolo, Khan Academy). Generate an action item like "Complete the assigned activity: <title>".
 For all other extracted text, summarise and explain the lesson content as normal.
 
 Your task:
