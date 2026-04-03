@@ -36,11 +36,15 @@ var (
 )
 
 const (
-	MinWordCountThreshold   = 100              // Lowered from 300 — announcements with mixed content typically have 50–150 words
-	ContentFetchTimeoutSecs = 60               // Per-file download timeout in seconds
-	LargePDFThresholdBytes  = 15 * 1024 * 1024 // 15 MB — PDFs larger than this are reference-only (e.g. full textbooks)
-	MaxPDFPagesExtract      = 30               // Maximum pages to extract from any PDF (prevents hanging on large textbooks)
-	MaxCombinedTextChars    = 20000            // Maximum characters sent to AI (prevents token overflow)
+	MinWordCountThreshold     = 100              // Lowered from 300 — announcements with mixed content typically have 50–150 words
+	ContentFetchTimeoutSecs   = 120              // Per-file download/extraction timeout for non-PDF attachments
+	LargePDFTimeoutSecs       = 600              // 10-minute timeout for PDF downloads (large textbooks can be 50 MB+)
+	LargePDFThresholdBytes    = 15 * 1024 * 1024 // 15 MB — sample pages for PDFs larger than this
+	LargePDFMaxDownloadBytes  = 50 * 1024 * 1024 // 50 MB — hard cap; above this use reference marker only
+	LargePDFSamplePageCount   = 6                // Number of evenly distributed pages to sample from large PDFs
+	MaxPDFPagesExtract        = 30               // Maximum pages to extract from any regular PDF
+	MaxCombinedTextChars      = 40000            // Maximum characters sent to AI (gpt-4o-mini supports 128k context)
+	MaxYouTubeTranscriptChars = 4000             // Per-video transcript cap — prevents crowding out other lesson content
 )
 
 type CatchUpService struct {
@@ -1441,20 +1445,30 @@ func (s *CatchUpService) extractFromPDF(ctx context.Context, client *http.Client
 		return "", fmt.Errorf("drive API error downloading PDF: %d - %s", resp.StatusCode, string(body))
 	}
 
-	// Use a hard-capped reader — files larger than LargePDFThresholdBytes (15 MB) are almost certainly
-	// full textbooks or large reference documents that should not be fully extracted.
-	// Reading +1 byte lets us detect when the file exceeds the threshold without downloading it all.
-	limitedReader := io.LimitReader(resp.Body, int64(LargePDFThresholdBytes)+1)
+	// Allow up to LargePDFMaxDownloadBytes (50 MB) so we can sample pages from large textbooks.
+	// Reading +1 byte lets us detect files above that hard cap without downloading them in full.
+	limitedReader := io.LimitReader(resp.Body, int64(LargePDFMaxDownloadBytes)+1)
 	pdfData, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return "", fmt.Errorf("failed to read PDF data: %w", err)
 	}
 
-	// If we read more data than the threshold the file is a large reference document.
-	// Return a reference marker so the AI can generate an action item instead of hanging.
+	// Files above the absolute cap (50 MB) are too large to process — use reference marker.
+	if len(pdfData) > LargePDFMaxDownloadBytes {
+		fmt.Printf("Very large PDF (>%.0f MB) — too large to sample, using reference marker\n",
+			float64(LargePDFMaxDownloadBytes)/(1024*1024))
+		return "[Large reference document — students should review this material as directed by their teacher]", nil
+	}
+
+	// Files between 15 MB and 50 MB are large documents (e.g. textbooks) — sample a spread of pages.
 	if len(pdfData) > LargePDFThresholdBytes {
-		fmt.Printf("Large PDF detected (>%.0f MB) — treating as reference material, not extracting\n",
-			float64(LargePDFThresholdBytes)/(1024*1024))
+		fmt.Printf("Large PDF detected (%.2f MB) — sampling %d pages\n",
+			float64(len(pdfData))/(1024*1024), LargePDFSamplePageCount)
+		sampled, sampErr := s.extractSampledPagesFromPDFBytes(pdfData)
+		if sampErr == nil && sampled != "" {
+			return sampled, nil
+		}
+		fmt.Printf("Page sampling failed: %v — falling back to reference marker\n", sampErr)
 		return "[Large reference document — students should review this material as directed by their teacher]", nil
 	}
 
@@ -1566,6 +1580,73 @@ func (s *CatchUpService) extractTextFromPDFBytes(pdfData []byte, pageLimit int) 
 	fmt.Printf("PDF text extraction complete: %d pages processed, %d words extracted\n", len(textParts), wordCount)
 
 	return combinedText, nil
+}
+
+// extractSampledPagesFromPDFBytes extracts text from evenly distributed sample pages of a large PDF.
+// Used for textbooks and reference documents where full extraction would be too slow or expensive.
+func (s *CatchUpService) extractSampledPagesFromPDFBytes(pdfData []byte) (string, error) {
+	tmpFile, err := os.CreateTemp("", "pdf-sample-*.pdf")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.Write(pdfData); err != nil {
+		return "", fmt.Errorf("failed to write PDF to temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	f, pdfReader, err := pdf.Open(tmpFile.Name())
+	if err != nil {
+		return "", fmt.Errorf("failed to open PDF: %w", err)
+	}
+	defer f.Close()
+
+	totalPages := pdfReader.NumPage()
+	if totalPages == 0 {
+		return "", fmt.Errorf("PDF has no pages")
+	}
+
+	samplePages := selectSamplePages(totalPages, LargePDFSamplePageCount)
+	fmt.Printf("Large PDF sampling: %d total pages, extracting pages %v\n", totalPages, samplePages)
+
+	var textParts []string
+	for _, pageNum := range samplePages {
+		page := pdfReader.Page(pageNum)
+		if page.V.IsNull() {
+			continue
+		}
+		pageText, err := page.GetPlainText(nil)
+		if err != nil || strings.TrimSpace(pageText) == "" {
+			continue
+		}
+		textParts = append(textParts, fmt.Sprintf("[Page %d of %d]\n%s", pageNum, totalPages, pageText))
+	}
+
+	if len(textParts) == 0 {
+		return "", fmt.Errorf("no text extracted from %d sampled pages", len(samplePages))
+	}
+
+	header := fmt.Sprintf("[Sampled %d pages from %d-page document — student should review full document]\n\n", len(textParts), totalPages)
+	return header + strings.Join(textParts, "\n\n---\n\n"), nil
+}
+
+// selectSamplePages returns up to sampleCount evenly distributed 1-based page numbers.
+// Always includes the first page and distributes the rest across the full document.
+func selectSamplePages(totalPages, sampleCount int) []int {
+	if totalPages <= sampleCount {
+		pages := make([]int, totalPages)
+		for i := range pages {
+			pages[i] = i + 1
+		}
+		return pages
+	}
+	pages := make([]int, sampleCount)
+	for i := 0; i < sampleCount; i++ {
+		pages[i] = 1 + (i*(totalPages-1))/(sampleCount-1)
+	}
+	return pages
 }
 
 // isTesseractAvailable checks if Tesseract OCR is installed on the system
@@ -2113,6 +2194,11 @@ func (s *CatchUpService) extractAndCombineText(
 						}
 						if hasTranscript && transcript != "" {
 							fmt.Printf("YouTube transcript fetched for '%s': %d words\n", att.Title, len(strings.Fields(transcript)))
+							// Cap transcript length so a single long video doesn't crowd out other lesson content
+							if len(transcript) > MaxYouTubeTranscriptChars {
+								transcript = transcript[:MaxYouTubeTranscriptChars] + "... [transcript continues — key content captured above]"
+								fmt.Printf("Transcript capped at %d chars\n", MaxYouTubeTranscriptChars)
+							}
 							combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_WITH_TRANSCRIPT: %s]\n%s", att.Title, transcript))
 						} else {
 							fmt.Printf("No transcript available for YouTube video '%s' — using title only\n", att.Title)
@@ -2133,8 +2219,13 @@ func (s *CatchUpService) extractAndCombineText(
 				continue
 			}
 
-			// Add per-file timeout to prevent a single slow download from hanging the entire job
-			attCtx, attCancel := context.WithTimeout(ctx, time.Duration(ContentFetchTimeoutSecs)*time.Second)
+			// Add per-file timeout to prevent a single slow download from hanging the entire job.
+			// PDFs (especially large textbooks) get a much longer timeout.
+			attTimeoutSecs := ContentFetchTimeoutSecs
+			if att.Kind == models.AttachmentKindPDF || att.MimeType == "application/pdf" || att.MimeType == "application/octet-stream" {
+				attTimeoutSecs = LargePDFTimeoutSecs
+			}
+			attCtx, attCancel := context.WithTimeout(ctx, time.Duration(attTimeoutSecs)*time.Second)
 			text, err := s.extractTextFromAttachment(attCtx, oauthCred, att)
 			attCancel()
 			if err != nil {
