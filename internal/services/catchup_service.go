@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,15 +37,16 @@ var (
 )
 
 const (
-	MinWordCountThreshold     = 100              // Lowered from 300 — announcements with mixed content typically have 50–150 words
-	ContentFetchTimeoutSecs   = 120              // Per-file download/extraction timeout for non-PDF attachments
-	LargePDFTimeoutSecs       = 600              // 10-minute timeout for PDF downloads (large textbooks can be 50 MB+)
-	LargePDFThresholdBytes    = 15 * 1024 * 1024 // 15 MB — sample pages for PDFs larger than this
-	LargePDFMaxDownloadBytes  = 50 * 1024 * 1024 // 50 MB — hard cap; above this use reference marker only
-	LargePDFSamplePageCount   = 6                // Number of evenly distributed pages to sample from large PDFs
-	MaxPDFPagesExtract        = 30               // Maximum pages to extract from any regular PDF
-	MaxCombinedTextChars      = 40000            // Maximum characters sent to AI (gpt-4o-mini supports 128k context)
-	MaxYouTubeTranscriptChars = 4000             // Per-video transcript cap — prevents crowding out other lesson content
+	MinWordCountThreshold       = 100              // Lowered from 300 — announcements with mixed content typically have 50–150 words
+	ContentFetchTimeoutSecs     = 120              // Per-file download/extraction timeout for non-PDF attachments
+	LargePDFTimeoutSecs         = 600              // 10-minute timeout for PDF downloads (large textbooks can be 50 MB+)
+	LargePDFThresholdBytes      = 15 * 1024 * 1024 // 15 MB — sample pages for PDFs larger than this
+	LargePDFMaxDownloadBytes    = 50 * 1024 * 1024 // 50 MB — threshold for very large PDFs
+	LargePDFSamplePageCount     = 6                // Number of evenly distributed pages to sample from 15–50 MB PDFs
+	VeryLargePDFSamplePageCount = 10               // Number of random pages to sample from 50+ MB PDFs
+	MaxPDFPagesExtract          = 30               // Maximum pages to extract from any regular PDF
+	MaxCombinedTextChars        = 40000            // Maximum characters sent to AI (gpt-4o-mini supports 128k context)
+	MaxYouTubeTranscriptChars   = 4000             // Per-video transcript cap — prevents crowding out other lesson content
 )
 
 type CatchUpService struct {
@@ -1445,24 +1447,31 @@ func (s *CatchUpService) extractFromPDF(ctx context.Context, client *http.Client
 		return "", fmt.Errorf("drive API error downloading PDF: %d - %s", resp.StatusCode, string(body))
 	}
 
-	// Allow up to LargePDFMaxDownloadBytes (50 MB) so we can sample pages from large textbooks.
-	// Reading +1 byte lets us detect files above that hard cap without downloading them in full.
-	limitedReader := io.LimitReader(resp.Body, int64(LargePDFMaxDownloadBytes)+1)
-	pdfData, err := io.ReadAll(limitedReader)
+	// Check Content-Length header first to avoid downloading huge files
+	contentLength := resp.ContentLength
+	if contentLength > int64(LargePDFMaxDownloadBytes) {
+		fmt.Printf("Very large PDF (%.2f MB) — using reference marker without extraction\n",
+			float64(contentLength)/(1024*1024))
+		resp.Body.Close()
+		return "[Large reference document — students should review this material as directed by their teacher]", nil
+	}
+
+	// Download the PDF (safe size or unknown size)
+	pdfData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read PDF data: %w", err)
 	}
 
-	// Files above the absolute cap (50 MB) are too large to process — use reference marker.
+	// Double-check actual size in case Content-Length was wrong
 	if len(pdfData) > LargePDFMaxDownloadBytes {
-		fmt.Printf("Very large PDF (>%.0f MB) — too large to sample, using reference marker\n",
-			float64(LargePDFMaxDownloadBytes)/(1024*1024))
+		fmt.Printf("Very large PDF (%.2f MB, reported as %.2f MB) — using reference marker\n",
+			float64(len(pdfData))/(1024*1024), float64(contentLength)/(1024*1024))
 		return "[Large reference document — students should review this material as directed by their teacher]", nil
 	}
 
-	// Files between 15 MB and 50 MB are large documents (e.g. textbooks) — sample a spread of pages.
+	// Files between 15 MB and 50 MB are large documents (e.g. textbooks) — sample evenly distributed pages.
 	if len(pdfData) > LargePDFThresholdBytes {
-		fmt.Printf("Large PDF detected (%.2f MB) — sampling %d pages\n",
+		fmt.Printf("Large PDF detected (%.2f MB) — sampling %d evenly distributed pages\n",
 			float64(len(pdfData))/(1024*1024), LargePDFSamplePageCount)
 		sampled, sampErr := s.extractSampledPagesFromPDFBytes(pdfData)
 		if sampErr == nil && sampled != "" {
@@ -1632,6 +1641,56 @@ func (s *CatchUpService) extractSampledPagesFromPDFBytes(pdfData []byte) (string
 	return header + strings.Join(textParts, "\n\n---\n\n"), nil
 }
 
+// extractRandomPagesFromPDFBytes extracts text from random pages of a very large PDF (50+ MB).
+// Always includes first and last pages, fills remaining slots with random pages from throughout the document.
+func (s *CatchUpService) extractRandomPagesFromPDFBytes(pdfData []byte, pageCount int) (string, error) {
+	tmpFile, err := os.CreateTemp("", "pdf-random-*.pdf")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.Write(pdfData); err != nil {
+		return "", fmt.Errorf("failed to write PDF to temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	f, pdfReader, err := pdf.Open(tmpFile.Name())
+	if err != nil {
+		return "", fmt.Errorf("failed to open PDF: %w", err)
+	}
+	defer f.Close()
+
+	totalPages := pdfReader.NumPage()
+	if totalPages == 0 {
+		return "", fmt.Errorf("PDF has no pages")
+	}
+
+	samplePages := selectRandomPages(totalPages, pageCount)
+	fmt.Printf("Very large PDF extraction: %d total pages, extracting %d random pages: %v\n", totalPages, len(samplePages), samplePages)
+
+	var textParts []string
+	for _, pageNum := range samplePages {
+		page := pdfReader.Page(pageNum)
+		if page.V.IsNull() {
+			continue
+		}
+		pageText, err := page.GetPlainText(nil)
+		if err != nil || strings.TrimSpace(pageText) == "" {
+			continue
+		}
+		textParts = append(textParts, fmt.Sprintf("[Page %d of %d]\n%s", pageNum, totalPages, pageText))
+	}
+
+	if len(textParts) == 0 {
+		return "", fmt.Errorf("no text extracted from %d random pages", len(samplePages))
+	}
+
+	header := fmt.Sprintf("[Extracted %d random pages from %d-page document — student should review full document]\n\n", len(textParts), totalPages)
+	return header + strings.Join(textParts, "\n\n---\n\n"), nil
+}
+
 // selectSamplePages returns up to sampleCount evenly distributed 1-based page numbers.
 // Always includes the first page and distributes the rest across the full document.
 func selectSamplePages(totalPages, sampleCount int) []int {
@@ -1646,6 +1705,51 @@ func selectSamplePages(totalPages, sampleCount int) []int {
 	for i := 0; i < sampleCount; i++ {
 		pages[i] = 1 + (i*(totalPages-1))/(sampleCount-1)
 	}
+	return pages
+}
+
+// selectRandomPages returns up to sampleCount random 1-based page numbers spread across the document.
+// Always includes page 1 (first page) and the last page, then fills remaining slots with random pages.
+func selectRandomPages(totalPages, sampleCount int) []int {
+	if totalPages <= sampleCount {
+		pages := make([]int, totalPages)
+		for i := range pages {
+			pages[i] = i + 1
+		}
+		return pages
+	}
+
+	pageSet := make(map[int]bool)
+	pages := make([]int, 0, sampleCount)
+
+	// Always include first and last pages
+	pageSet[1] = true
+	pageSet[totalPages] = true
+	pages = append(pages, 1)
+
+	// Fill remaining slots with random pages
+	for len(pages) < sampleCount {
+		randPage := rand.Intn(totalPages-2) + 2 // Pages 2 to totalPages-1
+		if !pageSet[randPage] {
+			pageSet[randPage] = true
+			pages = append(pages, randPage)
+		}
+	}
+
+	// Add last page if not already included
+	if !pageSet[totalPages] {
+		pages = append(pages, totalPages)
+	}
+
+	// Sort pages in ascending order using bubble sort
+	for i := 0; i < len(pages)-1; i++ {
+		for j := i + 1; j < len(pages); j++ {
+			if pages[j] < pages[i] {
+				pages[i], pages[j] = pages[j], pages[i]
+			}
+		}
+	}
+
 	return pages
 }
 
@@ -2295,6 +2399,13 @@ func (s *CatchUpService) generateAIContent(ctx context.Context, extractedContent
 			len(extractedContent.CombinedText), MaxCombinedTextChars)
 	}
 
+	// Debug: Show what content is being sent to AI
+	videoCount := strings.Count(contentText, "[VIDEO_WITH_TRANSCRIPT:")
+	videoOnlyCount := strings.Count(contentText, "[VIDEO_TITLE_ONLY:")
+	refDocCount := strings.Count(contentText, "[Large reference document")
+	fmt.Printf("Content breakdown for AI: %d videos w/ transcript, %d videos title-only, %d reference docs, %d total chars\n",
+		videoCount, videoOnlyCount, refDocCount, len(contentText))
+
 	client := openai.NewClient(s.config.OpenAIAPIKey)
 
 	prompt := fmt.Sprintf(`You are an educational AI assistant helping create a catch-up lesson for a student who missed class.
@@ -2305,7 +2416,7 @@ Class content from the day the student missed:
 %s
 
 IMPORTANT — how to handle special content markers:
-- "[VIDEO_WITH_TRANSCRIPT: <title>]" followed by transcript text: Use the transcript to explain the video content as part of the lesson. Summarise and explain it normally.
+- "[VIDEO_WITH_TRANSCRIPT: <title>]" followed by transcript text: This is HIGH PRIORITY content. Use the transcript extensively to explain the video content as part of the lesson. Incorporate video concepts prominently into both the explanation and quiz sections. Videos often contain key learning material.
 - "[VIDEO_TITLE_ONLY: <title>]" means no transcript was available. You MUST include this disclaimer in the explanation: "This summary is based on the video title only. Please watch the video for full understanding." Do NOT invent content from the title.
 - "[Large reference document — ...]" means a large textbook or document was attached. Generate an action item like "Review the relevant chapter in the provided textbook" — do NOT try to summarise it.
 For all other extracted text, summarise and explain the lesson content as normal.
@@ -2327,6 +2438,7 @@ Your task:
    - Use <em> for emphasis where appropriate
    - Make it engaging and easy to understand
    - Do NOT include any <script>, <style>, or potentially unsafe HTML tags
+   - PRIORITY: If video transcripts are available, prominently feature them with dedicated sections explaining the video content
 
 3. Generate 5-7 learning objectives that the student should achieve after reviewing this content
 
@@ -2334,6 +2446,7 @@ Your task:
    - Mix of multiple choice (4 options each) and short answer questions
    - Questions should test comprehension of the key concepts
    - Include the correct answer for each question
+   - CRITICAL REQUIREMENT: If video transcripts are available, AT LEAST 1 question MUST be directly based on the video content/transcript. Do not skip this requirement.
 
 Please respond in the following JSON format:
 {
