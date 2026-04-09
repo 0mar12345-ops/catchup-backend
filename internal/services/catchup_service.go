@@ -1934,8 +1934,12 @@ func (s *CatchUpService) extractWithOpenAIVision(ctx context.Context, fileData [
 	return strings.TrimSpace(extractedText), nil
 }
 
-// fetchYouTubeTranscript attempts to retrieve an English transcript for the given YouTube video ID
-// using yt-dlp (most reliable). Falls back to unofficial API if yt-dlp is not available.
+// fetchYouTubeTranscript attempts to retrieve an English transcript for the given YouTube video ID.
+// Order of methods:
+//  1. Supadata API (cloud-safe, no IP blocking)
+//  2. youtube-transcript-api Python library (works on non-cloud IPs)
+//  3. Simple timedtext API fallback
+//
 // Returns (transcript, hasTranscript, error). A false hasTranscript means no captions are available.
 func (s *CatchUpService) fetchYouTubeTranscript(ctx context.Context, videoID string) (string, bool, error) {
 	if videoID == "" {
@@ -1944,38 +1948,87 @@ func (s *CatchUpService) fetchYouTubeTranscript(ctx context.Context, videoID str
 
 	fmt.Printf("[YouTube] Fetching transcript for video ID: %s\n", videoID)
 
-	// Try yt-dlp first (most reliable)
-	if s.isYtDlpAvailable() {
-		transcript, hasTranscript, err := s.fetchTranscriptWithYtDlp(ctx, videoID)
-		if err == nil && hasTranscript && transcript != "" {
-			fmt.Printf("[YouTube] ✓ Successfully fetched transcript via yt-dlp (video: %s, length: %d chars)\n", videoID, len(transcript))
+	// Method 1: Supadata API — works on all servers including cloud/Linode IPs
+	if s.config.SupadataAPIKey != "" {
+		transcript, err := s.fetchTranscriptWithSupadata(ctx, videoID)
+		if err == nil && transcript != "" {
+			fmt.Printf("[YouTube] ✓ Supadata API success (video: %s, length: %d chars)\n", videoID, len(transcript))
 			return transcript, true, nil
 		}
-		if err != nil {
-			fmt.Printf("[YouTube] yt-dlp failed for %s: %v, trying fallback methods...\n", videoID, err)
-		}
+		fmt.Printf("[YouTube] Supadata failed for %s: %v, trying next method...\n", videoID, err)
 	} else {
-		fmt.Printf("[YouTube] yt-dlp not available, using fallback API methods\n")
+		fmt.Printf("[YouTube] SUPADATA_API_KEY not set, skipping Supadata\n")
 	}
 
-	// Fallback to simple API
-	transcript, hasTranscript, _ := s.trySimpleTranscriptFetch(ctx, videoID)
+	// Method 2: Python youtube-transcript-api (may be blocked on cloud IPs)
+	transcript, hasTranscript, err := s.fetchTranscriptWithYtDlp(ctx, videoID)
+	if err == nil && hasTranscript && transcript != "" {
+		fmt.Printf("[YouTube] ✓ Python API success (video: %s, length: %d chars)\n", videoID, len(transcript))
+		return transcript, true, nil
+	}
+	if err != nil {
+		fmt.Printf("[YouTube] Python API failed for %s: %v\n", videoID, err)
+	}
+
+	// Method 3: Simple timedtext API
+	transcript, hasTranscript, _ = s.trySimpleTranscriptFetch(ctx, videoID)
 	if hasTranscript && transcript != "" {
-		fmt.Printf("[YouTube] ✓ Successfully fetched transcript via simple API (video: %s, length: %d chars)\n", videoID, len(transcript))
+		fmt.Printf("[YouTube] ✓ Simple API success (video: %s, length: %d chars)\n", videoID, len(transcript))
 		return transcript, true, nil
 	}
 
-	// Final fallback: page extraction
-	fmt.Printf("[YouTube] Simple API failed for %s, trying page extraction method...\n", videoID)
-	transcript, hasTranscript, _ = s.extractTranscriptFromVideoPage(ctx, videoID)
-	if hasTranscript && transcript != "" {
-		fmt.Printf("[YouTube] ✓ Successfully fetched transcript via page extraction (video: %s, length: %d chars)\n", videoID, len(transcript))
-		return transcript, true, nil
-	}
-
-	// No transcript available
 	fmt.Printf("[YouTube] ✗ No transcript available for video: %s\n", videoID)
 	return "", false, nil
+}
+
+// fetchTranscriptWithSupadata uses the Supadata API to fetch YouTube transcripts.
+// This works reliably on cloud/Linode servers where YouTube blocks direct requests.
+func (s *CatchUpService) fetchTranscriptWithSupadata(ctx context.Context, videoID string) (string, error) {
+	fmt.Printf("[YouTube Debug] Trying Supadata API for %s\n", videoID)
+
+	apiURL := fmt.Sprintf("https://api.supadata.ai/v1/youtube/transcript?videoId=%s&text=true", videoID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("x-api-key", s.config.SupadataAPIKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Supadata returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var result struct {
+		Content string `json:"content"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	if result.Error != "" {
+		return "", fmt.Errorf("Supadata error: %s", result.Error)
+	}
+
+	transcript := strings.TrimSpace(result.Content)
+	if transcript == "" {
+		return "", fmt.Errorf("Supadata returned empty transcript")
+	}
+
+	fmt.Printf("[YouTube Debug] Supadata success: %d chars\n", len(transcript))
+	return transcript, nil
 }
 
 // isYtDlpAvailable checks if yt-dlp is installed on the system

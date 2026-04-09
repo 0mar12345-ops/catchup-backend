@@ -21,7 +21,8 @@ type Config struct {
 	GoogleOAuthState   string
 	FrontendURL        string
 
-	OpenAIAPIKey string
+	OpenAIAPIKey   string
+	SupadataAPIKey string
 
 	JWTSecret      string
 	JWTCookieName  string
@@ -46,7 +47,8 @@ func LoadConfig() *Config {
 		GoogleOAuthState:   getEnv("GOOGLE_OAUTH_STATE", "gclass-ai-state"),
 		FrontendURL:        getEnv("FRONTEND_URL", "http://localhost:3000"),
 
-		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
+		OpenAIAPIKey:   getEnv("OPENAI_API_KEY", ""),
+		SupadataAPIKey: getEnv("SUPADATA_API_KEY", ""),
 
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-env"),
 		JWTCookieName:  getEnv("JWT_COOKIE_NAME", "gclass_token"),
