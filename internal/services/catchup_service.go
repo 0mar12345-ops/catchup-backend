@@ -2318,86 +2318,125 @@ func (s *CatchUpService) extractAndCombineText(
 ) (*models.ExtractedContent, error) {
 	now := time.Now().UTC()
 
-	var combinedParts []string
 	var contentItemIDs []bson.ObjectID
 	warnings := []string{}
 
-	for _, item := range contentItems {
-		if !item.Included {
-			continue
-		}
+	// Process items in priority order: announcements first, then materials, then assignments.
+	// Announcements represent the teacher's direct lesson communication and define the lesson topic.
+	// Placing them first ensures the AI correctly identifies the primary subject for the catch-up.
+	priorityOrder := []models.ContentType{
+		models.ContentTypeAnnouncement,
+		models.ContentTypeMaterial,
+		models.ContentTypeAssignment,
+	}
+	sectionHeaders := map[models.ContentType]string{
+		models.ContentTypeAnnouncement: "=== TEACHER ANNOUNCEMENTS (Primary — defines what was taught this day) ===",
+		models.ContentTypeMaterial:     "=== SUPPLEMENTARY MATERIALS (Additional course resources) ===",
+		models.ContentTypeAssignment:   "=== COURSEWORK / ASSIGNMENTS ===",
+	}
 
-		contentItemIDs = append(contentItemIDs, item.ID)
+	var allSections []string
 
-		if item.Title != "" {
-			combinedParts = append(combinedParts, item.Title)
-		}
-		if item.Description != "" {
-			combinedParts = append(combinedParts, item.Description)
-		}
+	for _, contentType := range priorityOrder {
+		var sectionParts []string
 
-		for _, att := range item.Attachments {
-			if !att.IsSupported {
-				switch att.Kind {
-				case models.AttachmentKindVideo:
-					// Attempt to fetch the YouTube transcript (15-second timeout per video)
-					if att.ExternalID != "" {
-						transcriptCtx, transcriptCancel := context.WithTimeout(ctx, 15*time.Second)
-						transcript, hasTranscript, transcriptErr := s.fetchYouTubeTranscript(transcriptCtx, att.ExternalID)
-						fmt.Printf("YouTube transcript result — hasTranscript: %v, transcript: %s, err: %v\n", hasTranscript, transcript, transcriptErr)
-						transcriptCancel()
-						if transcriptErr != nil {
-							fmt.Printf("YouTube transcript error for '%s' (id=%s): %v\n", att.Title, att.ExternalID, transcriptErr)
-						}
-						if hasTranscript && transcript != "" {
-							fmt.Printf("YouTube transcript fetched for '%s': %d words\n", att.Title, len(strings.Fields(transcript)))
-							// Cap transcript length so a single long video doesn't crowd out other lesson content
-							if len(transcript) > MaxYouTubeTranscriptChars {
-								transcript = transcript[:MaxYouTubeTranscriptChars] + "... [transcript continues — key content captured above]"
-								fmt.Printf("Transcript capped at %d chars\n", MaxYouTubeTranscriptChars)
+		for _, item := range contentItems {
+			if !item.Included || item.Type != contentType {
+				continue
+			}
+
+			contentItemIDs = append(contentItemIDs, item.ID)
+
+			var itemParts []string
+
+			// Skip the generic "Announcement" title — the description body is the actual content
+			if item.Title != "" && item.Title != "Announcement" {
+				itemParts = append(itemParts, item.Title)
+			}
+			if item.Description != "" {
+				itemParts = append(itemParts, item.Description)
+			}
+
+			for _, att := range item.Attachments {
+				if !att.IsSupported {
+					switch att.Kind {
+					case models.AttachmentKindVideo:
+						// Attempt to fetch the YouTube transcript (15-second timeout per video)
+						if att.ExternalID != "" {
+							transcriptCtx, transcriptCancel := context.WithTimeout(ctx, 15*time.Second)
+							transcript, hasTranscript, transcriptErr := s.fetchYouTubeTranscript(transcriptCtx, att.ExternalID)
+							fmt.Printf("YouTube transcript result — hasTranscript: %v, transcript: %s, err: %v\n", hasTranscript, transcript, transcriptErr)
+							transcriptCancel()
+							if transcriptErr != nil {
+								fmt.Printf("YouTube transcript error for '%s' (id=%s): %v\n", att.Title, att.ExternalID, transcriptErr)
 							}
-							combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_WITH_TRANSCRIPT: %s]\n%s", att.Title, transcript))
-						} else {
-							fmt.Printf("No transcript available for YouTube video '%s' — using title only\n", att.Title)
-							combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_TITLE_ONLY: %s]", att.Title))
+							if hasTranscript && transcript != "" {
+								fmt.Printf("YouTube transcript fetched for '%s': %d words\n", att.Title, len(strings.Fields(transcript)))
+								// Cap transcript length so a single long video doesn't crowd out other lesson content
+								if len(transcript) > MaxYouTubeTranscriptChars {
+									transcript = transcript[:MaxYouTubeTranscriptChars] + "... [transcript continues — key content captured above]"
+									fmt.Printf("Transcript capped at %d chars\n", MaxYouTubeTranscriptChars)
+								}
+								itemParts = append(itemParts, fmt.Sprintf("[VIDEO_WITH_TRANSCRIPT: %s]\n%s", att.Title, transcript))
+							} else {
+								fmt.Printf("No transcript available for YouTube video '%s' — using title only\n", att.Title)
+								itemParts = append(itemParts, fmt.Sprintf("[VIDEO_TITLE_ONLY: %s]", att.Title))
+							}
+						} else if att.Title != "" {
+							itemParts = append(itemParts, fmt.Sprintf("[VIDEO_TITLE_ONLY: %s]", att.Title))
 						}
-					} else if att.Title != "" {
-						combinedParts = append(combinedParts, fmt.Sprintf("[VIDEO_TITLE_ONLY: %s]", att.Title))
+					case models.AttachmentKindExternalURL:
+						// Include the actual URL so the AI can reference it for students.
+						// Use the URL as label if the title is generic (e.g. "Log in", "Click here").
+						resourceTitle := att.Title
+						titleLower := strings.ToLower(strings.TrimSpace(resourceTitle))
+						isGenericTitle := resourceTitle == "" || titleLower == "log in" ||
+							titleLower == "click here" || titleLower == "here" || titleLower == "link"
+						if att.URL != "" && !isGenericTitle {
+							itemParts = append(itemParts, fmt.Sprintf("[External resource: %s — URL: %s]", att.Title, att.URL))
+						} else if att.URL != "" {
+							itemParts = append(itemParts, fmt.Sprintf("[External resource: %s]", att.URL))
+						} else if resourceTitle != "" {
+							itemParts = append(itemParts, fmt.Sprintf("[External resource: %s]", resourceTitle))
+						}
+					default:
+						warnings = append(warnings, fmt.Sprintf("Unsupported attachment: %s (%s)", att.Title, att.Kind))
 					}
-				case models.AttachmentKindExternalURL:
-					if att.Title != "" {
-						combinedParts = append(combinedParts, fmt.Sprintf("[Reference material: %s]", att.Title))
-					} else if att.URL != "" {
-						combinedParts = append(combinedParts, fmt.Sprintf("[Reference: %s]", att.URL))
-					}
-				default:
-					warnings = append(warnings, fmt.Sprintf("Unsupported attachment: %s (%s)", att.Title, att.Kind))
+					continue
 				}
-				continue
+
+				// Add per-file timeout to prevent a single slow download from hanging the entire job.
+				// PDFs (especially large textbooks) get a much longer timeout.
+				attTimeoutSecs := ContentFetchTimeoutSecs
+				if att.Kind == models.AttachmentKindPDF || att.MimeType == "application/pdf" || att.MimeType == "application/octet-stream" {
+					attTimeoutSecs = LargePDFTimeoutSecs
+				}
+				attCtx, attCancel := context.WithTimeout(ctx, time.Duration(attTimeoutSecs)*time.Second)
+				text, err := s.extractTextFromAttachment(attCtx, oauthCred, att)
+				attCancel()
+				if err != nil {
+					fmt.Printf("Warning: failed to extract text from '%s': %v — skipping attachment\n", att.Title, err)
+					warnings = append(warnings, fmt.Sprintf("Failed to extract text from %s: %v", att.Title, err))
+					continue
+				}
+
+				if text != "" {
+					itemParts = append(itemParts, text)
+				}
 			}
 
-			// Add per-file timeout to prevent a single slow download from hanging the entire job.
-			// PDFs (especially large textbooks) get a much longer timeout.
-			attTimeoutSecs := ContentFetchTimeoutSecs
-			if att.Kind == models.AttachmentKindPDF || att.MimeType == "application/pdf" || att.MimeType == "application/octet-stream" {
-				attTimeoutSecs = LargePDFTimeoutSecs
+			if len(itemParts) > 0 {
+				sectionParts = append(sectionParts, strings.Join(itemParts, "\n\n"))
 			}
-			attCtx, attCancel := context.WithTimeout(ctx, time.Duration(attTimeoutSecs)*time.Second)
-			text, err := s.extractTextFromAttachment(attCtx, oauthCred, att)
-			attCancel()
-			if err != nil {
-				fmt.Printf("Warning: failed to extract text from '%s': %v — skipping attachment\n", att.Title, err)
-				warnings = append(warnings, fmt.Sprintf("Failed to extract text from %s: %v", att.Title, err))
-				continue
-			}
+		}
 
-			if text != "" {
-				combinedParts = append(combinedParts, text)
-			}
+		if len(sectionParts) > 0 {
+			header := sectionHeaders[contentType]
+			allSections = append(allSections, header+"\n\n"+strings.Join(sectionParts, "\n\n---\n\n"))
 		}
 	}
 
-	combinedText := strings.Join(combinedParts, "\n\n")
+	combinedText := strings.Join(allSections, "\n\n"+strings.Repeat("=", 60)+"\n\n")
 	wordCount := len(strings.Fields(combinedText))
 	meetsThreshold := wordCount >= MinWordCountThreshold
 
@@ -2456,72 +2495,91 @@ func (s *CatchUpService) generateAIContent(ctx context.Context, extractedContent
 	videoCount := strings.Count(contentText, "[VIDEO_WITH_TRANSCRIPT:")
 	videoOnlyCount := strings.Count(contentText, "[VIDEO_TITLE_ONLY:")
 	refDocCount := strings.Count(contentText, "[Large reference document")
-	fmt.Printf("Content breakdown for AI: %d videos w/ transcript, %d videos title-only, %d reference docs, %d total chars\n",
-		videoCount, videoOnlyCount, refDocCount, len(contentText))
+	externalResourceCount := strings.Count(contentText, "[External resource:")
+	hasAnnouncements := strings.Contains(contentText, "=== TEACHER ANNOUNCEMENTS")
+	fmt.Printf("Content breakdown for AI: %d videos w/ transcript, %d videos title-only, %d reference docs, %d external links, has_announcements=%v, %d total chars\n",
+		videoCount, videoOnlyCount, refDocCount, externalResourceCount, hasAnnouncements, len(contentText))
 
 	client := openai.NewClient(s.config.OpenAIAPIKey)
 
-	prompt := fmt.Sprintf(`You are an educational AI assistant helping create a catch-up lesson for a student who missed class.
+	prompt := fmt.Sprintf(`You are an educational AI assistant creating a personalised catch-up lesson for a student who missed class.
 
 Course: %s
 
-Class content from the day the student missed:
+Below is the classroom content from the day the student was absent, organised into labelled sections:
+
 %s
 
-IMPORTANT — how to handle special content markers:
-- "[VIDEO_WITH_TRANSCRIPT: <title>]" followed by transcript text: This is HIGH PRIORITY content. Use the transcript extensively to explain the video content as part of the lesson. Incorporate video concepts prominently into both the explanation and quiz sections. Videos often contain key learning material.
-- "[VIDEO_TITLE_ONLY: <title>]" means no transcript was available. You MUST include this disclaimer in the explanation: "This summary is based on the video title only. Please watch the video for full understanding." Do NOT invent content from the title.
-- "[Large reference document — ...]" means a large textbook or document was attached. Generate an action item like "Review the relevant chapter in the provided textbook" — do NOT try to summarise it.
-For all other extracted text, summarise and explain the lesson content as normal.
+==============================
+STRICT RULES — READ CAREFULLY:
+==============================
 
-Your task:
-1. Create a concise, engaging title for this catch-up lesson (max 60 characters)
-   - Should clearly indicate the topic covered
-   - Make it student-friendly and descriptive
-   - Example: "Photosynthesis & Cell Respiration Overview"
+1. TOPIC IDENTIFICATION (most important):
+   - The "TEACHER ANNOUNCEMENTS" section defines the EXACT lesson topic for the day.
+   - Your catch-up title and the entire explanation MUST be based on this topic — never substitute or invent a different topic.
+   - Extract from announcements: topic names, tasks set, chapters/tools referenced, exam reminders, recommended platforms (e.g. Edrolo).
 
-2. Create a clear, structured explanation of what the student missed
-   - Format the explanation as clean, semantic HTML
-   - Use <h2> for main section headings
-   - Use <h3> for subsection headings
-   - Use <p> for paragraphs
-   - Use <ul> and <li> for bullet points
-   - Use <ol> and <li> for numbered lists
-   - Use <strong> for key terms or important concepts
-   - Use <em> for emphasis where appropriate
-   - Make it engaging and easy to understand
-   - Do NOT include any <script>, <style>, or potentially unsafe HTML tags
-   - PRIORITY: If video transcripts are available, prominently feature them with dedicated sections explaining the video content
+2. EXTERNAL LINKS — ALWAYS INCLUDE THEM:
+   - Every URL found anywhere in the content MUST appear in a <h2>Recommended Resources</h2> section.
+   - Format each as: <p><a href="URL">Descriptive title</a> — brief description</p>
+   - If the teacher named a platform (e.g. "Edrolo lesson") but no URL is in the content, still write: <p>Your teacher recommended completing the <strong>Edrolo lesson</strong> on [topic name]. Find it via your Edrolo account.</p>
+   - Always include Google Classroom links if present.
 
-3. Generate 5-7 learning objectives that the student should achieve after reviewing this content
+3. TEXTBOOK / LARGE REFERENCE DOCUMENTS:
+   - [Large reference document — ...] means a big textbook is attached. Do NOT summarise the entire book.
+   - Instead, direct the student to SPECIFIC chapters covering the announced topic.
+   - Example: "Refer to your <strong>Chemistry ATAR Units 3&4 textbook</strong> — find the chapters on <strong>Chemical Synthesis</strong>, covering the Haber Process and Contact Process."
 
-4. Create a quiz with 5-7 questions to check understanding
-   - Mix of multiple choice (4 options each) and short answer questions
-   - Questions should test comprehension of the key concepts
-   - Include the correct answer for each question
-   - CRITICAL REQUIREMENT: If video transcripts are available, AT LEAST 1 question MUST be directly based on the video content/transcript. Do not skip this requirement.
+4. VIDEO TRANSCRIPTS:
+   - [VIDEO_WITH_TRANSCRIPT: <title>] followed by transcript: If topically relevant, use it to enrich the explanation with specific examples, data points, or quotes. Show HOW the video connects to the lesson topic.
+   - [VIDEO_WITH_TRANSCRIPT: <title>] but off-topic: Add a short note in Recommended Resources: "A video '<strong>title</strong>' was also shared — watch it if relevant to your studies."
+   - [VIDEO_TITLE_ONLY: <title>]: No transcript. In Recommended Resources write: "Watch '<strong>title</strong>' as recommended by your teacher."
 
-Please respond in the following JSON format:
+5. WORKSHEETS / ASSIGNMENTS:
+   - Describe what the worksheet covers and how it connects to the lesson topic.
+   - Explicitly tell the student to complete it as part of their catch-up.
+
+6. EXAM / ASSESSMENT REMINDERS:
+   - If the teacher mentioned upcoming exams, mocks, or revision — add a prominent <h2>Upcoming Assessments</h2> section with the details.
+
+7. DEPTH OF EXPLANATION:
+   - Do not just list facts. Explain HOW concepts connect and WHY they matter.
+   - For each key concept: What is it? Why does it matter? How does it apply in this topic?
+   - Use concrete equations, examples, and cause-effect reasoning.
+
+==============================
+
+Your output tasks:
+
+1. Catch-up lesson title (max 60 chars) — must reflect the ACTUAL topic from the teacher's announcements.
+
+2. HTML explanation structured as:
+   <h2>What Was Covered Today</h2> — brief summary from the teacher's announcement
+   <h2>[Main Topic]</h2> — deep explanation of each key concept with connections between ideas
+   <h2>Your Tasks</h2> — what the student needs to do (worksheet, textbook chapters, Edrolo, etc.)
+   <h2>Recommended Resources</h2> — ALL links/platforms with <a href="..."> tags
+   <h2>Upcoming Assessments</h2> — only if teacher mentioned exams/revision
+   Allowed HTML: <h2>, <h3>, <p>, <ul>/<li>, <ol>/<li>, <strong>, <em>, <a href="..."> — NO <script> or <style>
+
+3. 5-7 learning objectives aligned with the actual lesson topic.
+
+4. Quiz with 5-7 questions on the ACTUAL lesson topic:
+   - Mix of multiple choice (4 options each) and short answer
+   - If a relevant video transcript was used, at least 1 question must come from it
+   - Include the correct answer for every question
+
+Respond ONLY in this exact JSON format (no text outside the JSON block):
 {
-  "title": "Concise lesson title",
-  "explanation": "<h2>Section Title</h2><p>Well-structured HTML explanation...</p><ul><li>Point 1</li></ul>",
-  "learning_objectives": ["Objective 1", "Objective 2", ...],
+  "title": "Lesson title",
+  "explanation": "<h2>...</h2><p>...</p>",
+  "learning_objectives": ["Objective 1", "Objective 2"],
   "quiz": [
-    {
-      "question": "Question text",
-      "type": "mcq",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "answer": "Option B"
-    },
-    {
-      "question": "Question text",
-      "type": "short_answer",
-      "answer": "Expected answer"
-    }
+    { "question": "...", "type": "mcq", "options": ["A", "B", "C", "D"], "answer": "B" },
+    { "question": "...", "type": "short_answer", "answer": "Expected answer" }
   ]
 }
 
-IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic HTML tags to structure the content properly.`, course.Name, contentText)
+The "explanation" field must contain valid HTML only.`, course.Name, contentText)
 
 	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
 		Model: openai.GPT4oMini,
@@ -2536,7 +2594,7 @@ IMPORTANT: The "explanation" field must contain valid HTML markup. Use semantic 
 			},
 		},
 		Temperature: 0.7,
-		MaxTokens:   3000,
+		MaxTokens:   5000,
 	})
 
 	if err != nil {
