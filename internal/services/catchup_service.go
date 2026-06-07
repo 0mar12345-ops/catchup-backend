@@ -23,7 +23,6 @@ import (
 	"github.com/0mar12345-ops/internal/models"
 	"github.com/gen2brain/go-fitz"
 	"github.com/ledongthuc/pdf"
-	"github.com/otiai10/gosseract/v2"
 	openai "github.com/sashabaranov/go-openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -1863,13 +1862,6 @@ func (s *CatchUpService) extractWithTesseractOCR(ctx context.Context, pdfData []
 
 	fmt.Printf("Converted PDF to %d images for OCR processing\n", len(images))
 
-	// Initialize Tesseract client
-	client := gosseract.NewClient()
-	defer client.Close()
-
-	// Set language to English (you can make this configurable)
-	client.SetLanguage("eng")
-
 	var textParts []string
 
 	// OCR each image, capped at MaxPDFPagesExtract to prevent excessive processing
@@ -1897,9 +1889,9 @@ func (s *CatchUpService) extractWithTesseractOCR(ctx context.Context, pdfData []
 			continue
 		}
 
-		// Perform OCR
-		client.SetImage(tmpImg.Name())
-		pageText, err := client.Text()
+		// Perform OCR using the system Tesseract CLI (cgo-free and compatible with this build environment).
+		cmd := exec.Command("tesseract", tmpImg.Name(), "stdout", "--psm", "6")
+		pageBytes, err := cmd.Output()
 
 		// Clean up temp file
 		os.Remove(tmpImg.Name())
@@ -1909,7 +1901,8 @@ func (s *CatchUpService) extractWithTesseractOCR(ctx context.Context, pdfData []
 			continue
 		}
 
-		if strings.TrimSpace(pageText) != "" {
+		pageText := strings.TrimSpace(string(pageBytes))
+		if pageText != "" {
 			textParts = append(textParts, pageText)
 			fmt.Printf("OCR page %d: %d words extracted\n", i+1, len(strings.Fields(pageText)))
 		}
