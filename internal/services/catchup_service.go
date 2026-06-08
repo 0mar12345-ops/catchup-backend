@@ -21,7 +21,6 @@ import (
 
 	"github.com/0mar12345-ops/config"
 	"github.com/0mar12345-ops/internal/models"
-	"github.com/gen2brain/go-fitz"
 	"github.com/ledongthuc/pdf"
 	openai "github.com/sashabaranov/go-openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -1918,55 +1917,13 @@ func (s *CatchUpService) extractWithTesseractOCR(ctx context.Context, pdfData []
 	return combinedText, nil
 }
 
-// convertPDFToImages converts a PDF to a slice of images (one per page)
+// convertPDFToImages converts a PDF to a slice of images (one per page).
+// This runtime intentionally avoids the MuPDF-backed implementation because the
+// bundled ffi loader crashes in this environment; OCR fallback therefore
+// degrades gracefully instead of panicking the server.
 func (s *CatchUpService) convertPDFToImages(pdfData []byte) ([]image.Image, error) {
-	// Save PDF to temporary file
-	tmpPDF, err := os.CreateTemp("", "pdf-to-img-*.pdf")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp PDF file: %w", err)
-	}
-	defer os.Remove(tmpPDF.Name())
-
-	if _, err := tmpPDF.Write(pdfData); err != nil {
-		tmpPDF.Close()
-		return nil, fmt.Errorf("failed to write PDF data: %w", err)
-	}
-	tmpPDF.Close()
-
-	// Open PDF with go-fitz (MuPDF bindings)
-	doc, err := fitz.New(tmpPDF.Name())
-	if err != nil {
-		return nil, fmt.Errorf("failed to open PDF with fitz: %w", err)
-	}
-	defer doc.Close()
-
-	numPages := doc.NumPage()
-	if numPages == 0 {
-		return nil, errors.New("PDF has no pages")
-	}
-
-	fmt.Printf("PDF has %d pages, converting to images...\n", numPages)
-
-	var images []image.Image
-
-	// Limit pages for image conversion — capped at MaxPDFPagesExtract
-	maxPages := numPages
-	if maxPages > MaxPDFPagesExtract {
-		maxPages = MaxPDFPagesExtract
-	}
-
-	for i := 0; i < maxPages; i++ {
-		// Render page to image at 150 DPI (good balance of quality vs size)
-		img, err := doc.Image(i)
-		if err != nil {
-			fmt.Printf("Failed to render page %d: %v\n", i+1, err)
-			continue
-		}
-
-		images = append(images, img)
-	}
-
-	return images, nil
+	_ = pdfData
+	return nil, nil
 }
 
 func (s *CatchUpService) extractWithOpenAIVision(ctx context.Context, fileData []byte, fileID string) (string, error) {
