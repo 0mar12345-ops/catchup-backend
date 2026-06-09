@@ -18,7 +18,7 @@ var (
 	ErrInvalidBehaviourCourseID  = errors.New("invalid course id")
 	ErrInvalidBehaviourType      = errors.New("type must be 'positive' or 'negative'")
 	ErrBehaviourCategoryRequired = errors.New("category is required")
-	ErrBehaviourStudentRequired  = errors.New("student_email and student_name are required")
+	ErrBehaviourStudentRequired  = errors.New("student_name is required")
 )
 
 type BehaviourService struct {
@@ -84,7 +84,7 @@ func (s *BehaviourService) CreateBehaviourLog(ctx context.Context, input CreateB
 		return nil, ErrBehaviourCategoryRequired
 	}
 
-	if strings.TrimSpace(input.StudentEmail) == "" || strings.TrimSpace(input.StudentName) == "" {
+	if strings.TrimSpace(input.StudentName) == "" {
 		return nil, ErrBehaviourStudentRequired
 	}
 

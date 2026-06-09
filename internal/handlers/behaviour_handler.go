@@ -36,7 +36,7 @@ func (h *BehaviourHandler) CreateBehaviourLog(c *gin.Context) {
 	var input struct {
 		CourseID     string `json:"course_id" binding:"required"`
 		CourseName   string `json:"course_name"`
-		StudentEmail string `json:"student_email" binding:"required"`
+		StudentEmail string `json:"student_email"`
 		StudentName  string `json:"student_name" binding:"required"`
 		Type         string `json:"type" binding:"required"`
 		Category     string `json:"category" binding:"required"`
