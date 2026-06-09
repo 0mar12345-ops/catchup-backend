@@ -8,7 +8,17 @@ import (
 )
 
 func registerPptxRoutes(api *gin.RouterGroup, deps Dependencies) {
-	service := services.NewPptxService(deps.MongoClient, deps.DBName, deps.Config)
+	userOAuthService := services.NewUserOAuthService(
+		deps.GoogleClientID,
+		deps.GoogleClientSecret,
+		deps.GoogleRedirectURL,
+		deps.GoogleOAuthState,
+		deps.FrontendURL,
+		deps.MongoClient,
+		deps.DBName,
+	)
+
+	service := services.NewPptxService(deps.MongoClient, deps.DBName, deps.Config, userOAuthService)
 	handler := handlers.NewPptxHandler(service)
 	authGuard := middleware.NewAuthGuard(deps.JWTSecret, deps.JWTCookieName)
 

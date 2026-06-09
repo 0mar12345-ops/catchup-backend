@@ -16,8 +16,6 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 var (
@@ -27,25 +25,15 @@ var (
 
 type PptxService struct {
 	coursesCollection *mongo.Collection
-	oauthCollection   *mongo.Collection
 	config            *config.Config
-	oauthConfig       *oauth2.Config
+	userOAuthService  *UserOAuthService
 }
 
-func NewPptxService(client *mongo.Client, dbName string, cfg *config.Config) *PptxService {
-	db := client.Database(dbName)
+func NewPptxService(client *mongo.Client, dbName string, cfg *config.Config, userOAuthService *UserOAuthService) *PptxService {
 	return &PptxService{
-		coursesCollection: db.Collection("courses"),
-		oauthCollection:   db.Collection("oauth_credentials"),
+		coursesCollection: client.Database(dbName).Collection("courses"),
 		config:            cfg,
-		oauthConfig: &oauth2.Config{
-			ClientID:     cfg.GoogleClientID,
-			ClientSecret: cfg.GoogleClientSecret,
-			Endpoint:     google.Endpoint,
-			// Scopes here are used only for token refresh; the actual granted scopes
-			// come from the stored refresh token issued during initial OAuth consent.
-			Scopes: []string{"https://www.googleapis.com/auth/presentations"},
-		},
+		userOAuthService:  userOAuthService,
 	}
 }
 
@@ -119,52 +107,21 @@ func (s *PptxService) GeneratePptx(
 	return s.createGoogleSlidesPresentation(ctx, httpClient, course.Name, weekLabel, topicLabel, content)
 }
 
-// getOAuthClient retrieves the teacher's stored token, auto-refreshes it, and
-// returns an authorised http.Client for the Google Slides API.
+// getOAuthClient uses the shared UserOAuthService (which holds the full OAuth
+// config with all granted scopes) so token refresh never strips previously
+// granted permissions.
 func (s *PptxService) getOAuthClient(ctx context.Context, teacherOID, schoolOID bson.ObjectID) (*http.Client, error) {
-	var cred models.OAuthCredential
-	err := s.oauthCollection.FindOne(ctx, bson.M{
-		"user_id":   teacherOID,
-		"school_id": schoolOID,
-	}).Decode(&cred)
+	oauthCred, err := s.userOAuthService.GetOAuthCredential(ctx, teacherOID, schoolOID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, ErrGoogleOAuthRequired
-		}
-		return nil, err
-	}
-	if cred.RefreshTokenEnc == "" {
 		return nil, ErrGoogleOAuthRequired
 	}
 
-	token := &oauth2.Token{
-		AccessToken:  cred.AccessTokenEnc,
-		RefreshToken: cred.RefreshTokenEnc,
-		TokenType:    "Bearer",
-	}
-	if cred.AccessTokenExpiry != nil {
-		token.Expiry = *cred.AccessTokenExpiry
-	}
-
-	freshToken, err := s.oauthConfig.TokenSource(ctx, token).Token()
+	client, err := s.userOAuthService.RefreshOAuthToken(ctx, oauthCred)
 	if err != nil {
-		s.oauthCollection.UpdateOne(ctx, bson.M{"_id": cred.ID}, bson.M{"$set": bson.M{ //nolint:errcheck
-			"status": "invalid", "updated_at": time.Now().UTC(),
-		}})
 		return nil, ErrGoogleOAuthRequired
 	}
 
-	if freshToken.AccessToken != cred.AccessTokenEnc {
-		s.oauthCollection.UpdateOne(ctx, bson.M{"_id": cred.ID}, bson.M{"$set": bson.M{ //nolint:errcheck
-			"access_token_enc":    freshToken.AccessToken,
-			"access_token_expiry": freshToken.Expiry,
-			"refresh_token_enc":   freshToken.RefreshToken,
-			"status":              "valid",
-			"updated_at":          time.Now().UTC(),
-		}})
-	}
-
-	return s.oauthConfig.Client(ctx, freshToken), nil
+	return client, nil
 }
 
 // ---------------------------------------------------------------------------
