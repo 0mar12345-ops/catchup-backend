@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -48,7 +47,7 @@ func (h *PptxHandler) GeneratePptx(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
-	buf, filename, err := h.service.GeneratePptx(
+	presentationURL, err := h.service.GeneratePptx(
 		ctx,
 		teacherID, schoolID,
 		input.CourseID,
@@ -60,16 +59,13 @@ func (h *PptxHandler) GeneratePptx(c *gin.Context) {
 		switch {
 		case errors.Is(err, services.ErrOpenAINotConfigured):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI generation is not configured"})
+		case errors.Is(err, services.ErrGoogleOAuthRequired):
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		}
 		return
 	}
 
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	c.Data(
-		http.StatusOK,
-		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-		buf.Bytes(),
-	)
+	c.JSON(http.StatusOK, gin.H{"presentation_url": presentationURL})
 }

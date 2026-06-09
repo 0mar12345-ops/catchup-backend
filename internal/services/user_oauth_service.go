@@ -65,6 +65,7 @@ func NewUserOAuthService(
 				"https://www.googleapis.com/auth/classroom.announcements",
 				"https://www.googleapis.com/auth/drive.readonly",
 				"https://www.googleapis.com/auth/drive.file",
+				"https://www.googleapis.com/auth/presentations",
 			},
 		},
 		state:       state,
