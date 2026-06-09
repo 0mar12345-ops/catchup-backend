@@ -56,7 +56,9 @@ func (s *RoleService) UpdateUserRole(ctx context.Context, callerSchoolID, target
 
 // DetectAndUpdateRole calls the Google Classroom API to determine whether the user
 // teaches any courses, then updates their stored role accordingly.
-// Admin role is never downgraded by this method.
+//   - admin   → returned as-is; never downgraded
+//   - student → returned as-is; students require manual admin promotion
+//   - teacher or empty → Classroom API is called; teacher if courses > 0, student if none
 func (s *RoleService) DetectAndUpdateRole(ctx context.Context, userID, schoolID string) (string, error) {
 	userOID, err := bson.ObjectIDFromHex(userID)
 	if err != nil {
@@ -71,10 +73,15 @@ func (s *RoleService) DetectAndUpdateRole(ctx context.Context, userID, schoolID 
 	if err := s.usersCollection.FindOne(ctx, bson.M{"_id": userOID, "school_id": schoolOID}).Decode(&user); err != nil {
 		return "", fmt.Errorf("user not found")
 	}
-	if user.Role == models.UserRoleAdmin {
+
+	switch user.Role {
+	case models.UserRoleAdmin:
 		return string(models.UserRoleAdmin), nil
+	case models.UserRoleStudent:
+		return string(models.UserRoleStudent), nil
 	}
 
+	// Role is "teacher" or unset — run Classroom detection.
 	cred, err := s.userOAuthService.GetOAuthCredential(ctx, userOID, schoolOID)
 	if err != nil {
 		return "", fmt.Errorf("no google account connected – please authorise in Settings")
