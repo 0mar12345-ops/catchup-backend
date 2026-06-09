@@ -178,6 +178,7 @@ func buildPptx(courseName, weekLabel, topic string, c *pptxAIContent) (*bytes.Bu
 	buf := new(bytes.Buffer)
 	zw := zip.NewWriter(buf)
 
+	// [Content_Types].xml must be first in the ZIP.
 	if err := writeZipEntry(zw, "[Content_Types].xml", contentTypesXML(len(slides))); err != nil {
 		return nil, err
 	}
@@ -188,6 +189,10 @@ func buildPptx(courseName, weekLabel, topic string, c *pptxAIContent) (*bytes.Bu
 		return nil, err
 	}
 	if err := writeZipEntry(zw, "ppt/_rels/presentation.xml.rels", presentationRelsXML(len(slides))); err != nil {
+		return nil, err
+	}
+	// Theme is required: the slide master relationship points to it.
+	if err := writeZipEntry(zw, "ppt/theme/theme1.xml", themeXML()); err != nil {
 		return nil, err
 	}
 	if err := writeZipEntry(zw, "ppt/slideMasters/slideMaster1.xml", slideMasterXML()); err != nil {
@@ -279,6 +284,7 @@ func contentTypesXML(numSlides int) string {
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.theme+xml"/>
   <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
   <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>`)
 	for i := 1; i <= numSlides; i++ {
@@ -361,7 +367,7 @@ func slideMasterXML() string {
             accent4="accent4" accent5="accent5" accent6="accent6"
             hlink="hlink" folHlink="folHlink"/>
   <p:sldLayoutIdLst>
-    <p:sldLayoutId id="2147483649" r:id="rId1"/>
+    <p:sldLayoutId id="2147483649" r:id="rId2"/>
   </p:sldLayoutIdLst>
   <p:txStyles>
     <p:titleStyle><a:lvl1pPr><a:defRPr/></a:lvl1pPr></p:titleStyle>
@@ -374,7 +380,8 @@ func slideMasterXML() string {
 func slideMasterRelsXML() string {
 	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
 </Relationships>`
 }
 
@@ -418,6 +425,66 @@ func slideRelsXML() string {
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
 </Relationships>`
+}
+
+// themeXML returns a minimal but fully valid DrawingML theme.
+// PowerPoint requires the slide master to have a theme relationship; without it
+// the file is treated as corrupt. The format scheme must contain at least 3 entries
+// in each of its four style lists (fillStyleLst, lnStyleLst, effectStyleLst, bgFillStyleLst).
+func themeXML() string {
+	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Catchup Theme">
+  <a:themeElements>
+    <a:clrScheme name="Catchup">
+      <a:dk1><a:srgbClr val="1C1917"/></a:dk1>
+      <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="3D3580"/></a:dk2>
+      <a:lt2><a:srgbClr val="FAF9F6"/></a:lt2>
+      <a:accent1><a:srgbClr val="3D3580"/></a:accent1>
+      <a:accent2><a:srgbClr val="5B4FCF"/></a:accent2>
+      <a:accent3><a:srgbClr val="C4BBEE"/></a:accent3>
+      <a:accent4><a:srgbClr val="16A34A"/></a:accent4>
+      <a:accent5><a:srgbClr val="D97706"/></a:accent5>
+      <a:accent6><a:srgbClr val="DC2626"/></a:accent6>
+      <a:hlink><a:srgbClr val="3D3580"/></a:hlink>
+      <a:folHlink><a:srgbClr val="5B4FCF"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="Catchup">
+      <a:majorFont>
+        <a:latin typeface="Calibri Light"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:majorFont>
+      <a:minorFont>
+        <a:latin typeface="Calibri"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="Catchup">
+      <a:fillStyleLst>
+        <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+        <a:solidFill><a:srgbClr val="FAF9F6"/></a:solidFill>
+        <a:solidFill><a:srgbClr val="3D3580"/></a:solidFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="6350" cap="flat" cmpd="sng"><a:solidFill><a:srgbClr val="3D3580"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="12700" cap="flat" cmpd="sng"><a:solidFill><a:srgbClr val="3D3580"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="19050" cap="flat" cmpd="sng"><a:solidFill><a:srgbClr val="3D3580"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+      </a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+        <a:solidFill><a:srgbClr val="FAF9F6"/></a:solidFill>
+        <a:solidFill><a:srgbClr val="3D3580"/></a:solidFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+</a:theme>`
 }
 
 // ---------------------------------------------------------------------------
@@ -514,8 +581,7 @@ func renderContentSlide(title string, items []string, numbered bool) string {
 	sb.WriteString(`<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="1028700"/></a:xfrm>`)
 	sb.WriteString(`<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>`)
 	sb.WriteString(`<a:solidFill><a:srgbClr val="3D3580"/></a:solidFill>`)
-	sb.WriteString(`<a:ln><a:noFill/></a:ln></p:spPr>`)
-	sb.WriteString(`<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>`)
+	sb.WriteString(`<a:ln><a:noFill/></a:ln></p:spPr></p:sp>`)
 
 	// Title text box (overlays the bar)
 	sb.WriteString("\n      <p:sp>")
