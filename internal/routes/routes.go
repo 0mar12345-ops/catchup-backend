@@ -50,4 +50,5 @@ func SetupRoutes(router *gin.Engine, mongoClient *mongo.Client, cfg *config.Conf
 	registerBehaviourRoutes(api, deps)
 	registerCatchUpRoutes(api, deps)
 	registerAdminRoutes(api, deps)
+	registerUserRoleRoutes(api, deps)
 }

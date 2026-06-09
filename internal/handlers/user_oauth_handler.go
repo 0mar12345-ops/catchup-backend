@@ -234,7 +234,7 @@ func (h *UserOAuthHandler) createJWT(data *services.OAuthSyncResult) (string, er
 		"school_id":     data.SchoolID,
 		"email":         data.TeacherEmail,
 		"name":          data.TeacherName,
-		"role":          "teacher",
+		"role":          data.Role,
 		"courses_sync":  data.CoursesSynced,
 		"students_sync": data.StudentsSynced,
 		"iat":           now.Unix(),

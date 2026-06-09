@@ -234,6 +234,7 @@ type OAuthSyncResult struct {
 	TeacherName        string `json:"teacher_name"`
 	SchoolID           string `json:"school_id"`
 	UserID             string `json:"user_id"`
+	Role               string `json:"role"`
 	CoursesSynced      int    `json:"courses_synced"`
 	StudentsSynced     int    `json:"students_synced"`
 	EnrollmentsSynced  int    `json:"enrollments_synced"`
@@ -278,7 +279,20 @@ func (s *UserOAuthService) HandleGoogleCallback(ctx context.Context, state, code
 		return nil, err
 	}
 
-	teacher, err := s.upsertTeacher(ctx, school.ID, userInfo, now)
+	// Detect role: first user in school → admin; has Classroom courses → teacher; else → student.
+	// Count is taken before upsert so the first-user check is accurate.
+	existingUserCount, _ := s.usersCollection.CountDocuments(ctx, bson.M{"school_id": school.ID})
+	var detectedRole models.UserRole
+	switch {
+	case existingUserCount == 0:
+		detectedRole = models.UserRoleAdmin
+	case len(courses) > 0:
+		detectedRole = models.UserRoleTeacher
+	default:
+		detectedRole = models.UserRoleStudent
+	}
+
+	teacher, err := s.upsertTeacher(ctx, school.ID, userInfo, detectedRole, now)
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +349,7 @@ func (s *UserOAuthService) HandleGoogleCallback(ctx context.Context, state, code
 		TeacherName:        userInfo.Name,
 		SchoolID:           school.ID.Hex(),
 		UserID:             teacher.ID.Hex(),
+		Role:               string(teacher.Role),
 		CoursesSynced:      coursesSynced,
 		StudentsSynced:     len(studentSet),
 		EnrollmentsSynced:  enrollmentsSynced,
@@ -500,7 +515,9 @@ func (s *UserOAuthService) getFirstSchool(ctx context.Context) (*models.School, 
 	return &school, nil
 }
 
-func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.ObjectID, info *googleUserInfo, now time.Time) (*models.User, error) {
+// upsertTeacher inserts or updates the authenticating user. detectedRole is used only
+// when creating a new user — existing users keep their stored role unchanged.
+func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.ObjectID, info *googleUserInfo, detectedRole models.UserRole, now time.Time) (*models.User, error) {
 	normalizedEmail := strings.TrimSpace(strings.ToLower(info.Email))
 	filter := bson.M{
 		"school_id": schoolID,
@@ -510,27 +527,28 @@ func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.Obje
 		},
 	}
 
-	user := models.User{
-		SchoolID:     schoolID,
-		Role:         models.UserRoleTeacher,
-		Name:         info.Name,
-		Email:        normalizedEmail,
-		GoogleUserID: info.ID,
-		IsActive:     true,
-		LastLoginAt:  &now,
-		ExternalRefs: []models.ExternalSystemRef{{
-			Provider:     models.ProviderGoogleOAuth,
-			ExternalID:   info.ID,
-			LastSyncedAt: &now,
-		}},
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
+	externalRefs := []models.ExternalSystemRef{{
+		Provider:     models.ProviderGoogleOAuth,
+		ExternalID:   info.ID,
+		LastSyncedAt: &now,
+	}}
 
 	var existing models.User
 	err := s.usersCollection.FindOne(ctx, filter).Decode(&existing)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		user.ID = bson.NewObjectID()
+		user := models.User{
+			ID:           bson.NewObjectID(),
+			SchoolID:     schoolID,
+			Role:         detectedRole,
+			Name:         info.Name,
+			Email:        normalizedEmail,
+			GoogleUserID: info.ID,
+			IsActive:     true,
+			LastLoginAt:  &now,
+			ExternalRefs: externalRefs,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
 		_, err := s.usersCollection.InsertOne(ctx, user)
 		if err != nil {
 			return nil, err
@@ -541,14 +559,14 @@ func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.Obje
 		return nil, err
 	}
 
+	// Existing user — update profile fields but preserve their stored role.
 	update := bson.M{"$set": bson.M{
-		"name":           user.Name,
-		"email":          user.Email,
-		"google_user_id": user.GoogleUserID,
-		"role":           user.Role,
+		"name":           info.Name,
+		"email":          normalizedEmail,
+		"google_user_id": info.ID,
 		"is_active":      true,
 		"last_login_at":  &now,
-		"external_refs":  user.ExternalRefs,
+		"external_refs":  externalRefs,
 		"updated_at":     now,
 	}}
 
@@ -557,12 +575,12 @@ func (s *UserOAuthService) upsertTeacher(ctx context.Context, schoolID bson.Obje
 		return nil, err
 	}
 
-	existing.Name = user.Name
-	existing.Email = user.Email
-	existing.Role = user.Role
+	existing.Name = info.Name
+	existing.Email = normalizedEmail
+	existing.GoogleUserID = info.ID
 	existing.IsActive = true
 	existing.LastLoginAt = &now
-	existing.ExternalRefs = user.ExternalRefs
+	existing.ExternalRefs = externalRefs
 	existing.UpdatedAt = now
 
 	return &existing, nil

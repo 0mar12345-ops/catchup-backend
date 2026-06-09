@@ -13,7 +13,7 @@ func registerAdminRoutes(api *gin.RouterGroup, deps Dependencies) {
 	authGuard := middleware.NewAuthGuard(deps.JWTSecret, deps.JWTCookieName)
 
 	group := api.Group("/admin")
-	group.Use(authGuard.RequireAuth())
+	group.Use(authGuard.RequireAuth(), middleware.RequireRole("admin"))
 	{
 		group.GET("/overview", handler.GetOverview)
 	}
