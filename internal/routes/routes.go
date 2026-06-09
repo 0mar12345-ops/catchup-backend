@@ -46,6 +46,7 @@ func SetupRoutes(router *gin.Engine, mongoClient *mongo.Client, cfg *config.Conf
 	registerUserRoutes(api, deps)
 	registerCourseRoutes(api, deps)
 	registerLessonBuilderRoutes(api, deps)
+	registerPptxRoutes(api, deps)
 	registerBehaviourRoutes(api, deps)
 	registerCatchUpRoutes(api, deps)
 }
