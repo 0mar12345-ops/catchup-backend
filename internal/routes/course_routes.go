@@ -10,6 +10,18 @@ import (
 func registerCourseRoutes(api *gin.RouterGroup, deps Dependencies) {
 	courseService := services.NewCourseService(deps.MongoClient, deps.DBName)
 	courseHandler := handlers.NewCourseHandler(courseService)
+
+	oauthService := services.NewUserOAuthService(
+		deps.GoogleClientID,
+		deps.GoogleClientSecret,
+		deps.GoogleRedirectURL,
+		deps.GoogleOAuthState,
+		deps.FrontendURL,
+		deps.MongoClient,
+		deps.DBName,
+	)
+	selectionHandler := handlers.NewCourseSelectionHandler(oauthService)
+
 	authGuard := middleware.NewAuthGuard(deps.JWTSecret, deps.JWTCookieName)
 
 	courses := api.Group("/courses")
@@ -17,5 +29,7 @@ func registerCourseRoutes(api *gin.RouterGroup, deps Dependencies) {
 	{
 		courses.GET("", courseHandler.ListDashboardCourses)
 		courses.GET("/:id", courseHandler.GetCourse)
+		courses.GET("/available", selectionHandler.GetAvailableCourses)
+		courses.POST("/import", selectionHandler.ImportCourses)
 	}
 }
